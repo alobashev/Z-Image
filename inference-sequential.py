@@ -832,10 +832,8 @@ class ZImageTransformer2DModel(nn.Module):
         nr0_attn = nr0_attn.transpose(1, 2).reshape(1, x_state.shape[1], self.q_proj_dim)
         if self.debug_nan:
             debug_check_finite("nr0_attn_merge", nr0_attn)
-        nr0_attn = nr0_attn / 1000.0
-        if self.debug_nan:
-            debug_check_finite("nr0_attn_pre_out_proj_scaled", nr0_attn)
-        nr0_attn = torch.matmul(nr0_attn, self.nr0_attention_to_out_weight.t())
+        nr0_attn_dtype = nr0_attn.dtype
+        nr0_attn = torch.matmul(nr0_attn.float(), self.nr0_attention_to_out_weight.t().float())
         if self.debug_nan:
             debug_check_finite("nr0_attn_out_proj", nr0_attn)
         nr0_attn_norm = torch.rsqrt(nr0_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps)
@@ -844,12 +842,11 @@ class ZImageTransformer2DModel(nn.Module):
         nr0_attn = nr0_attn * nr0_attn_norm
         if self.debug_nan:
             debug_check_finite("nr0_attn_post_norm", nr0_attn)
-        nr0_attn = nr0_attn * 1000.0
-        if self.debug_nan:
-            debug_check_finite("nr0_attn_post_norm_compensated", nr0_attn)
-        if self.debug_nan:
             debug_check_finite("nr0_attention_norm2_weight", self.nr0_attention_norm2_weight)
-        nr0_attn = nr0_attn * self.nr0_attention_norm2_weight
+        nr0_attn = nr0_attn * self.nr0_attention_norm2_weight.float()
+        if self.debug_nan:
+            debug_check_finite("nr0_attn_fp32", nr0_attn)
+        nr0_attn = nr0_attn.to(nr0_attn_dtype)
         if self.debug_nan:
             debug_check_finite("nr0_attn", nr0_attn)
         x_state = x_state + nr0_gate_msa * nr0_attn
@@ -911,8 +908,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("nr1_probs", nr1_probs)
         nr1_attn = torch.matmul(nr1_probs, nr1_v)
         nr1_attn = nr1_attn.transpose(1, 2).reshape(1, x_state.shape[1], self.q_proj_dim)
-        nr1_attn = torch.matmul(nr1_attn, self.nr1_attention_to_out_weight.t())
-        nr1_attn = nr1_attn * torch.rsqrt(nr1_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr1_attention_norm2_weight
+        nr1_attn_dtype = nr1_attn.dtype
+        nr1_attn = torch.matmul(nr1_attn.float(), self.nr1_attention_to_out_weight.t().float())
+        nr1_attn = nr1_attn * torch.rsqrt(nr1_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr1_attention_norm2_weight.float()
+        nr1_attn = nr1_attn.to(nr1_attn_dtype)
         if self.debug_nan:
             debug_check_finite("nr1_attn", nr1_attn)
         x_state = x_state + nr1_gate_msa * nr1_attn
@@ -965,8 +964,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("cr0_probs", cr0_probs)
         cr0_attn = torch.matmul(cr0_probs, cr0_v)
         cr0_attn = cr0_attn.transpose(1, 2).reshape(1, cap_state.shape[1], self.q_proj_dim)
-        cr0_attn = torch.matmul(cr0_attn, self.cr0_attention_to_out_weight.t())
-        cr0_attn = cr0_attn * torch.rsqrt(cr0_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr0_attention_norm2_weight
+        cr0_attn_dtype = cr0_attn.dtype
+        cr0_attn = torch.matmul(cr0_attn.float(), self.cr0_attention_to_out_weight.t().float())
+        cr0_attn = cr0_attn * torch.rsqrt(cr0_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr0_attention_norm2_weight.float()
+        cr0_attn = cr0_attn.to(cr0_attn_dtype)
         if self.debug_nan:
             debug_check_finite("cr0_attn", cr0_attn)
         cap_state = cap_state + cr0_attn
@@ -1017,8 +1018,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("cr1_probs", cr1_probs)
         cr1_attn = torch.matmul(cr1_probs, cr1_v)
         cr1_attn = cr1_attn.transpose(1, 2).reshape(1, cap_state.shape[1], self.q_proj_dim)
-        cr1_attn = torch.matmul(cr1_attn, self.cr1_attention_to_out_weight.t())
-        cr1_attn = cr1_attn * torch.rsqrt(cr1_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr1_attention_norm2_weight
+        cr1_attn_dtype = cr1_attn.dtype
+        cr1_attn = torch.matmul(cr1_attn.float(), self.cr1_attention_to_out_weight.t().float())
+        cr1_attn = cr1_attn * torch.rsqrt(cr1_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr1_attention_norm2_weight.float()
+        cr1_attn = cr1_attn.to(cr1_attn_dtype)
         if self.debug_nan:
             debug_check_finite("cr1_attn", cr1_attn)
         cap_state = cap_state + cr1_attn
@@ -1087,8 +1090,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer0_probs", layer0_probs)
         layer0_attn = torch.matmul(layer0_probs, layer0_v)
         layer0_attn = layer0_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer0_attn = torch.matmul(layer0_attn, self.layer0_attention_to_out_weight.t())
-        layer0_attn = layer0_attn * torch.rsqrt(layer0_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer0_attention_norm2_weight
+        layer0_attn_dtype = layer0_attn.dtype
+        layer0_attn = torch.matmul(layer0_attn.float(), self.layer0_attention_to_out_weight.t().float())
+        layer0_attn = layer0_attn * torch.rsqrt(layer0_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer0_attention_norm2_weight.float()
+        layer0_attn = layer0_attn.to(layer0_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer0_attn", layer0_attn)
         unified_state = unified_state + layer0_gate_msa * layer0_attn
@@ -1150,8 +1155,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer1_probs", layer1_probs)
         layer1_attn = torch.matmul(layer1_probs, layer1_v)
         layer1_attn = layer1_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer1_attn = torch.matmul(layer1_attn, self.layer1_attention_to_out_weight.t())
-        layer1_attn = layer1_attn * torch.rsqrt(layer1_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer1_attention_norm2_weight
+        layer1_attn_dtype = layer1_attn.dtype
+        layer1_attn = torch.matmul(layer1_attn.float(), self.layer1_attention_to_out_weight.t().float())
+        layer1_attn = layer1_attn * torch.rsqrt(layer1_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer1_attention_norm2_weight.float()
+        layer1_attn = layer1_attn.to(layer1_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer1_attn", layer1_attn)
         unified_state = unified_state + layer1_gate_msa * layer1_attn
@@ -1213,8 +1220,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer2_probs", layer2_probs)
         layer2_attn = torch.matmul(layer2_probs, layer2_v)
         layer2_attn = layer2_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer2_attn = torch.matmul(layer2_attn, self.layer2_attention_to_out_weight.t())
-        layer2_attn = layer2_attn * torch.rsqrt(layer2_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer2_attention_norm2_weight
+        layer2_attn_dtype = layer2_attn.dtype
+        layer2_attn = torch.matmul(layer2_attn.float(), self.layer2_attention_to_out_weight.t().float())
+        layer2_attn = layer2_attn * torch.rsqrt(layer2_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer2_attention_norm2_weight.float()
+        layer2_attn = layer2_attn.to(layer2_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer2_attn", layer2_attn)
         unified_state = unified_state + layer2_gate_msa * layer2_attn
@@ -1276,8 +1285,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer3_probs", layer3_probs)
         layer3_attn = torch.matmul(layer3_probs, layer3_v)
         layer3_attn = layer3_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer3_attn = torch.matmul(layer3_attn, self.layer3_attention_to_out_weight.t())
-        layer3_attn = layer3_attn * torch.rsqrt(layer3_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer3_attention_norm2_weight
+        layer3_attn_dtype = layer3_attn.dtype
+        layer3_attn = torch.matmul(layer3_attn.float(), self.layer3_attention_to_out_weight.t().float())
+        layer3_attn = layer3_attn * torch.rsqrt(layer3_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer3_attention_norm2_weight.float()
+        layer3_attn = layer3_attn.to(layer3_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer3_attn", layer3_attn)
         unified_state = unified_state + layer3_gate_msa * layer3_attn
@@ -1339,8 +1350,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer4_probs", layer4_probs)
         layer4_attn = torch.matmul(layer4_probs, layer4_v)
         layer4_attn = layer4_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer4_attn = torch.matmul(layer4_attn, self.layer4_attention_to_out_weight.t())
-        layer4_attn = layer4_attn * torch.rsqrt(layer4_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer4_attention_norm2_weight
+        layer4_attn_dtype = layer4_attn.dtype
+        layer4_attn = torch.matmul(layer4_attn.float(), self.layer4_attention_to_out_weight.t().float())
+        layer4_attn = layer4_attn * torch.rsqrt(layer4_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer4_attention_norm2_weight.float()
+        layer4_attn = layer4_attn.to(layer4_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer4_attn", layer4_attn)
         unified_state = unified_state + layer4_gate_msa * layer4_attn
@@ -1402,8 +1415,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer5_probs", layer5_probs)
         layer5_attn = torch.matmul(layer5_probs, layer5_v)
         layer5_attn = layer5_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer5_attn = torch.matmul(layer5_attn, self.layer5_attention_to_out_weight.t())
-        layer5_attn = layer5_attn * torch.rsqrt(layer5_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer5_attention_norm2_weight
+        layer5_attn_dtype = layer5_attn.dtype
+        layer5_attn = torch.matmul(layer5_attn.float(), self.layer5_attention_to_out_weight.t().float())
+        layer5_attn = layer5_attn * torch.rsqrt(layer5_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer5_attention_norm2_weight.float()
+        layer5_attn = layer5_attn.to(layer5_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer5_attn", layer5_attn)
         unified_state = unified_state + layer5_gate_msa * layer5_attn
@@ -1465,8 +1480,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer6_probs", layer6_probs)
         layer6_attn = torch.matmul(layer6_probs, layer6_v)
         layer6_attn = layer6_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer6_attn = torch.matmul(layer6_attn, self.layer6_attention_to_out_weight.t())
-        layer6_attn = layer6_attn * torch.rsqrt(layer6_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer6_attention_norm2_weight
+        layer6_attn_dtype = layer6_attn.dtype
+        layer6_attn = torch.matmul(layer6_attn.float(), self.layer6_attention_to_out_weight.t().float())
+        layer6_attn = layer6_attn * torch.rsqrt(layer6_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer6_attention_norm2_weight.float()
+        layer6_attn = layer6_attn.to(layer6_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer6_attn", layer6_attn)
         unified_state = unified_state + layer6_gate_msa * layer6_attn
@@ -1528,8 +1545,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer7_probs", layer7_probs)
         layer7_attn = torch.matmul(layer7_probs, layer7_v)
         layer7_attn = layer7_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer7_attn = torch.matmul(layer7_attn, self.layer7_attention_to_out_weight.t())
-        layer7_attn = layer7_attn * torch.rsqrt(layer7_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer7_attention_norm2_weight
+        layer7_attn_dtype = layer7_attn.dtype
+        layer7_attn = torch.matmul(layer7_attn.float(), self.layer7_attention_to_out_weight.t().float())
+        layer7_attn = layer7_attn * torch.rsqrt(layer7_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer7_attention_norm2_weight.float()
+        layer7_attn = layer7_attn.to(layer7_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer7_attn", layer7_attn)
         unified_state = unified_state + layer7_gate_msa * layer7_attn
@@ -1591,8 +1610,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer8_probs", layer8_probs)
         layer8_attn = torch.matmul(layer8_probs, layer8_v)
         layer8_attn = layer8_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer8_attn = torch.matmul(layer8_attn, self.layer8_attention_to_out_weight.t())
-        layer8_attn = layer8_attn * torch.rsqrt(layer8_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer8_attention_norm2_weight
+        layer8_attn_dtype = layer8_attn.dtype
+        layer8_attn = torch.matmul(layer8_attn.float(), self.layer8_attention_to_out_weight.t().float())
+        layer8_attn = layer8_attn * torch.rsqrt(layer8_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer8_attention_norm2_weight.float()
+        layer8_attn = layer8_attn.to(layer8_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer8_attn", layer8_attn)
         unified_state = unified_state + layer8_gate_msa * layer8_attn
@@ -1654,8 +1675,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer9_probs", layer9_probs)
         layer9_attn = torch.matmul(layer9_probs, layer9_v)
         layer9_attn = layer9_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer9_attn = torch.matmul(layer9_attn, self.layer9_attention_to_out_weight.t())
-        layer9_attn = layer9_attn * torch.rsqrt(layer9_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer9_attention_norm2_weight
+        layer9_attn_dtype = layer9_attn.dtype
+        layer9_attn = torch.matmul(layer9_attn.float(), self.layer9_attention_to_out_weight.t().float())
+        layer9_attn = layer9_attn * torch.rsqrt(layer9_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer9_attention_norm2_weight.float()
+        layer9_attn = layer9_attn.to(layer9_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer9_attn", layer9_attn)
         unified_state = unified_state + layer9_gate_msa * layer9_attn
@@ -1717,8 +1740,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer10_probs", layer10_probs)
         layer10_attn = torch.matmul(layer10_probs, layer10_v)
         layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
-        layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+        layer10_attn_dtype = layer10_attn.dtype
+        layer10_attn = torch.matmul(layer10_attn.float(), self.layer10_attention_to_out_weight.t().float())
+        layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight.float()
+        layer10_attn = layer10_attn.to(layer10_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer10_attn", layer10_attn)
         unified_state = unified_state + layer10_gate_msa * layer10_attn
@@ -1780,8 +1805,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer11_probs", layer11_probs)
         layer11_attn = torch.matmul(layer11_probs, layer11_v)
         layer11_attn = layer11_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer11_attn = torch.matmul(layer11_attn, self.layer11_attention_to_out_weight.t())
-        layer11_attn = layer11_attn * torch.rsqrt(layer11_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer11_attention_norm2_weight
+        layer11_attn_dtype = layer11_attn.dtype
+        layer11_attn = torch.matmul(layer11_attn.float(), self.layer11_attention_to_out_weight.t().float())
+        layer11_attn = layer11_attn * torch.rsqrt(layer11_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer11_attention_norm2_weight.float()
+        layer11_attn = layer11_attn.to(layer11_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer11_attn", layer11_attn)
         unified_state = unified_state + layer11_gate_msa * layer11_attn
@@ -1843,8 +1870,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer12_probs", layer12_probs)
         layer12_attn = torch.matmul(layer12_probs, layer12_v)
         layer12_attn = layer12_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer12_attn = torch.matmul(layer12_attn, self.layer12_attention_to_out_weight.t())
-        layer12_attn = layer12_attn * torch.rsqrt(layer12_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer12_attention_norm2_weight
+        layer12_attn_dtype = layer12_attn.dtype
+        layer12_attn = torch.matmul(layer12_attn.float(), self.layer12_attention_to_out_weight.t().float())
+        layer12_attn = layer12_attn * torch.rsqrt(layer12_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer12_attention_norm2_weight.float()
+        layer12_attn = layer12_attn.to(layer12_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer12_attn", layer12_attn)
         unified_state = unified_state + layer12_gate_msa * layer12_attn
@@ -1906,8 +1935,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer13_probs", layer13_probs)
         layer13_attn = torch.matmul(layer13_probs, layer13_v)
         layer13_attn = layer13_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer13_attn = torch.matmul(layer13_attn, self.layer13_attention_to_out_weight.t())
-        layer13_attn = layer13_attn * torch.rsqrt(layer13_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer13_attention_norm2_weight
+        layer13_attn_dtype = layer13_attn.dtype
+        layer13_attn = torch.matmul(layer13_attn.float(), self.layer13_attention_to_out_weight.t().float())
+        layer13_attn = layer13_attn * torch.rsqrt(layer13_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer13_attention_norm2_weight.float()
+        layer13_attn = layer13_attn.to(layer13_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer13_attn", layer13_attn)
         unified_state = unified_state + layer13_gate_msa * layer13_attn
@@ -1969,8 +2000,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer14_probs", layer14_probs)
         layer14_attn = torch.matmul(layer14_probs, layer14_v)
         layer14_attn = layer14_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer14_attn = torch.matmul(layer14_attn, self.layer14_attention_to_out_weight.t())
-        layer14_attn = layer14_attn * torch.rsqrt(layer14_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer14_attention_norm2_weight
+        layer14_attn_dtype = layer14_attn.dtype
+        layer14_attn = torch.matmul(layer14_attn.float(), self.layer14_attention_to_out_weight.t().float())
+        layer14_attn = layer14_attn * torch.rsqrt(layer14_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer14_attention_norm2_weight.float()
+        layer14_attn = layer14_attn.to(layer14_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer14_attn", layer14_attn)
         unified_state = unified_state + layer14_gate_msa * layer14_attn
@@ -2032,8 +2065,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer15_probs", layer15_probs)
         layer15_attn = torch.matmul(layer15_probs, layer15_v)
         layer15_attn = layer15_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer15_attn = torch.matmul(layer15_attn, self.layer15_attention_to_out_weight.t())
-        layer15_attn = layer15_attn * torch.rsqrt(layer15_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer15_attention_norm2_weight
+        layer15_attn_dtype = layer15_attn.dtype
+        layer15_attn = torch.matmul(layer15_attn.float(), self.layer15_attention_to_out_weight.t().float())
+        layer15_attn = layer15_attn * torch.rsqrt(layer15_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer15_attention_norm2_weight.float()
+        layer15_attn = layer15_attn.to(layer15_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer15_attn", layer15_attn)
         unified_state = unified_state + layer15_gate_msa * layer15_attn
@@ -2095,8 +2130,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer16_probs", layer16_probs)
         layer16_attn = torch.matmul(layer16_probs, layer16_v)
         layer16_attn = layer16_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer16_attn = torch.matmul(layer16_attn, self.layer16_attention_to_out_weight.t())
-        layer16_attn = layer16_attn * torch.rsqrt(layer16_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer16_attention_norm2_weight
+        layer16_attn_dtype = layer16_attn.dtype
+        layer16_attn = torch.matmul(layer16_attn.float(), self.layer16_attention_to_out_weight.t().float())
+        layer16_attn = layer16_attn * torch.rsqrt(layer16_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer16_attention_norm2_weight.float()
+        layer16_attn = layer16_attn.to(layer16_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer16_attn", layer16_attn)
         unified_state = unified_state + layer16_gate_msa * layer16_attn
@@ -2158,8 +2195,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer17_probs", layer17_probs)
         layer17_attn = torch.matmul(layer17_probs, layer17_v)
         layer17_attn = layer17_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer17_attn = torch.matmul(layer17_attn, self.layer17_attention_to_out_weight.t())
-        layer17_attn = layer17_attn * torch.rsqrt(layer17_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer17_attention_norm2_weight
+        layer17_attn_dtype = layer17_attn.dtype
+        layer17_attn = torch.matmul(layer17_attn.float(), self.layer17_attention_to_out_weight.t().float())
+        layer17_attn = layer17_attn * torch.rsqrt(layer17_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer17_attention_norm2_weight.float()
+        layer17_attn = layer17_attn.to(layer17_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer17_attn", layer17_attn)
         unified_state = unified_state + layer17_gate_msa * layer17_attn
@@ -2221,8 +2260,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer18_probs", layer18_probs)
         layer18_attn = torch.matmul(layer18_probs, layer18_v)
         layer18_attn = layer18_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer18_attn = torch.matmul(layer18_attn, self.layer18_attention_to_out_weight.t())
-        layer18_attn = layer18_attn * torch.rsqrt(layer18_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer18_attention_norm2_weight
+        layer18_attn_dtype = layer18_attn.dtype
+        layer18_attn = torch.matmul(layer18_attn.float(), self.layer18_attention_to_out_weight.t().float())
+        layer18_attn = layer18_attn * torch.rsqrt(layer18_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer18_attention_norm2_weight.float()
+        layer18_attn = layer18_attn.to(layer18_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer18_attn", layer18_attn)
         unified_state = unified_state + layer18_gate_msa * layer18_attn
@@ -2284,8 +2325,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer19_probs", layer19_probs)
         layer19_attn = torch.matmul(layer19_probs, layer19_v)
         layer19_attn = layer19_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer19_attn = torch.matmul(layer19_attn, self.layer19_attention_to_out_weight.t())
-        layer19_attn = layer19_attn * torch.rsqrt(layer19_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer19_attention_norm2_weight
+        layer19_attn_dtype = layer19_attn.dtype
+        layer19_attn = torch.matmul(layer19_attn.float(), self.layer19_attention_to_out_weight.t().float())
+        layer19_attn = layer19_attn * torch.rsqrt(layer19_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer19_attention_norm2_weight.float()
+        layer19_attn = layer19_attn.to(layer19_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer19_attn", layer19_attn)
         unified_state = unified_state + layer19_gate_msa * layer19_attn
@@ -2347,8 +2390,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer20_probs", layer20_probs)
         layer20_attn = torch.matmul(layer20_probs, layer20_v)
         layer20_attn = layer20_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer20_attn = torch.matmul(layer20_attn, self.layer20_attention_to_out_weight.t())
-        layer20_attn = layer20_attn * torch.rsqrt(layer20_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer20_attention_norm2_weight
+        layer20_attn_dtype = layer20_attn.dtype
+        layer20_attn = torch.matmul(layer20_attn.float(), self.layer20_attention_to_out_weight.t().float())
+        layer20_attn = layer20_attn * torch.rsqrt(layer20_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer20_attention_norm2_weight.float()
+        layer20_attn = layer20_attn.to(layer20_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer20_attn", layer20_attn)
         unified_state = unified_state + layer20_gate_msa * layer20_attn
@@ -2410,8 +2455,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer21_probs", layer21_probs)
         layer21_attn = torch.matmul(layer21_probs, layer21_v)
         layer21_attn = layer21_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer21_attn = torch.matmul(layer21_attn, self.layer21_attention_to_out_weight.t())
-        layer21_attn = layer21_attn * torch.rsqrt(layer21_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer21_attention_norm2_weight
+        layer21_attn_dtype = layer21_attn.dtype
+        layer21_attn = torch.matmul(layer21_attn.float(), self.layer21_attention_to_out_weight.t().float())
+        layer21_attn = layer21_attn * torch.rsqrt(layer21_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer21_attention_norm2_weight.float()
+        layer21_attn = layer21_attn.to(layer21_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer21_attn", layer21_attn)
         unified_state = unified_state + layer21_gate_msa * layer21_attn
@@ -2473,8 +2520,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer22_probs", layer22_probs)
         layer22_attn = torch.matmul(layer22_probs, layer22_v)
         layer22_attn = layer22_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer22_attn = torch.matmul(layer22_attn, self.layer22_attention_to_out_weight.t())
-        layer22_attn = layer22_attn * torch.rsqrt(layer22_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer22_attention_norm2_weight
+        layer22_attn_dtype = layer22_attn.dtype
+        layer22_attn = torch.matmul(layer22_attn.float(), self.layer22_attention_to_out_weight.t().float())
+        layer22_attn = layer22_attn * torch.rsqrt(layer22_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer22_attention_norm2_weight.float()
+        layer22_attn = layer22_attn.to(layer22_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer22_attn", layer22_attn)
         unified_state = unified_state + layer22_gate_msa * layer22_attn
@@ -2536,8 +2585,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer23_probs", layer23_probs)
         layer23_attn = torch.matmul(layer23_probs, layer23_v)
         layer23_attn = layer23_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer23_attn = torch.matmul(layer23_attn, self.layer23_attention_to_out_weight.t())
-        layer23_attn = layer23_attn * torch.rsqrt(layer23_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer23_attention_norm2_weight
+        layer23_attn_dtype = layer23_attn.dtype
+        layer23_attn = torch.matmul(layer23_attn.float(), self.layer23_attention_to_out_weight.t().float())
+        layer23_attn = layer23_attn * torch.rsqrt(layer23_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer23_attention_norm2_weight.float()
+        layer23_attn = layer23_attn.to(layer23_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer23_attn", layer23_attn)
         unified_state = unified_state + layer23_gate_msa * layer23_attn
@@ -2599,8 +2650,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer24_probs", layer24_probs)
         layer24_attn = torch.matmul(layer24_probs, layer24_v)
         layer24_attn = layer24_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer24_attn = torch.matmul(layer24_attn, self.layer24_attention_to_out_weight.t())
-        layer24_attn = layer24_attn * torch.rsqrt(layer24_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer24_attention_norm2_weight
+        layer24_attn_dtype = layer24_attn.dtype
+        layer24_attn = torch.matmul(layer24_attn.float(), self.layer24_attention_to_out_weight.t().float())
+        layer24_attn = layer24_attn * torch.rsqrt(layer24_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer24_attention_norm2_weight.float()
+        layer24_attn = layer24_attn.to(layer24_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer24_attn", layer24_attn)
         unified_state = unified_state + layer24_gate_msa * layer24_attn
@@ -2662,8 +2715,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer25_probs", layer25_probs)
         layer25_attn = torch.matmul(layer25_probs, layer25_v)
         layer25_attn = layer25_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer25_attn = torch.matmul(layer25_attn, self.layer25_attention_to_out_weight.t())
-        layer25_attn = layer25_attn * torch.rsqrt(layer25_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer25_attention_norm2_weight
+        layer25_attn_dtype = layer25_attn.dtype
+        layer25_attn = torch.matmul(layer25_attn.float(), self.layer25_attention_to_out_weight.t().float())
+        layer25_attn = layer25_attn * torch.rsqrt(layer25_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer25_attention_norm2_weight.float()
+        layer25_attn = layer25_attn.to(layer25_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer25_attn", layer25_attn)
         unified_state = unified_state + layer25_gate_msa * layer25_attn
@@ -2725,8 +2780,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer26_probs", layer26_probs)
         layer26_attn = torch.matmul(layer26_probs, layer26_v)
         layer26_attn = layer26_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer26_attn = torch.matmul(layer26_attn, self.layer26_attention_to_out_weight.t())
-        layer26_attn = layer26_attn * torch.rsqrt(layer26_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer26_attention_norm2_weight
+        layer26_attn_dtype = layer26_attn.dtype
+        layer26_attn = torch.matmul(layer26_attn.float(), self.layer26_attention_to_out_weight.t().float())
+        layer26_attn = layer26_attn * torch.rsqrt(layer26_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer26_attention_norm2_weight.float()
+        layer26_attn = layer26_attn.to(layer26_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer26_attn", layer26_attn)
         unified_state = unified_state + layer26_gate_msa * layer26_attn
@@ -2788,8 +2845,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer27_probs", layer27_probs)
         layer27_attn = torch.matmul(layer27_probs, layer27_v)
         layer27_attn = layer27_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer27_attn = torch.matmul(layer27_attn, self.layer27_attention_to_out_weight.t())
-        layer27_attn = layer27_attn * torch.rsqrt(layer27_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer27_attention_norm2_weight
+        layer27_attn_dtype = layer27_attn.dtype
+        layer27_attn = torch.matmul(layer27_attn.float(), self.layer27_attention_to_out_weight.t().float())
+        layer27_attn = layer27_attn * torch.rsqrt(layer27_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer27_attention_norm2_weight.float()
+        layer27_attn = layer27_attn.to(layer27_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer27_attn", layer27_attn)
         unified_state = unified_state + layer27_gate_msa * layer27_attn
@@ -2851,8 +2910,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer28_probs", layer28_probs)
         layer28_attn = torch.matmul(layer28_probs, layer28_v)
         layer28_attn = layer28_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer28_attn = torch.matmul(layer28_attn, self.layer28_attention_to_out_weight.t())
-        layer28_attn = layer28_attn * torch.rsqrt(layer28_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer28_attention_norm2_weight
+        layer28_attn_dtype = layer28_attn.dtype
+        layer28_attn = torch.matmul(layer28_attn.float(), self.layer28_attention_to_out_weight.t().float())
+        layer28_attn = layer28_attn * torch.rsqrt(layer28_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer28_attention_norm2_weight.float()
+        layer28_attn = layer28_attn.to(layer28_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer28_attn", layer28_attn)
         unified_state = unified_state + layer28_gate_msa * layer28_attn
@@ -2914,8 +2975,10 @@ class ZImageTransformer2DModel(nn.Module):
             debug_check_finite("layer29_probs", layer29_probs)
         layer29_attn = torch.matmul(layer29_probs, layer29_v)
         layer29_attn = layer29_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
-        layer29_attn = torch.matmul(layer29_attn, self.layer29_attention_to_out_weight.t())
-        layer29_attn = layer29_attn * torch.rsqrt(layer29_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer29_attention_norm2_weight
+        layer29_attn_dtype = layer29_attn.dtype
+        layer29_attn = torch.matmul(layer29_attn.float(), self.layer29_attention_to_out_weight.t().float())
+        layer29_attn = layer29_attn * torch.rsqrt(layer29_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer29_attention_norm2_weight.float()
+        layer29_attn = layer29_attn.to(layer29_attn_dtype)
         if self.debug_nan:
             debug_check_finite("layer29_attn", layer29_attn)
         unified_state = unified_state + layer29_gate_msa * layer29_attn
