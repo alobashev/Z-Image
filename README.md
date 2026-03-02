@@ -111,119 +111,36 @@ According to the Elo-based Human Preference Evaluation on [*Alibaba AI Arena*](h
 
 
 ### 🚀 Quick Start
-#### (1) PyTorch Native Inference
-Build a virtual environment you like and then install the dependencies:
+This repository now keeps only the minimal local PyTorch inference path.
+
+Install dependencies:
 ```bash
 pip install -e .
 ```
-Then run the following code to generate an image:
+
+Download a Z-Image checkpoint locally so the directory contains:
+```text
+<model>/
+  transformer/
+  vae/
+  text_encoder/
+  tokenizer/
+  scheduler/
+```
+
+Run text-to-image generation:
 ```bash
-python inference.py
+python inference.py \
+  --model /path/to/Z-Image-Turbo \
+  --output example.png \
+  "Young Chinese woman in red Hanfu, intricate embroidery, neon lightning-bolt lamp above her palm"
 ```
 
-#### (2) Diffusers Inference
-Install the latest version of diffusers, use the following command:
-<details>
-  <summary>Click here for details for why you need to install diffusers from source</summary>
-
-  We have submitted two pull requests ([#12703](https://github.com/huggingface/diffusers/pull/12703) and [#12715](https://github.com/huggingface/diffusers/pull/12715)) to the 🤗 diffusers repository to add support for Z-Image. Both PRs have been merged into the latest official diffusers release.
-  Therefore, you need to install diffusers from source for the latest features and Z-Image support.
-
-</details>
-
-```bash
-pip install git+https://github.com/huggingface/diffusers
-```
-
-<details>
-<summary><b>Z-Image-Turbo</b> - Click to expand</summary>
-
-Then, try the following code to generate an image:
-```python
-import torch
-from diffusers import ZImagePipeline
-
-# 1. Load the pipeline
-# Use bfloat16 for optimal performance on supported GPUs
-pipe = ZImagePipeline.from_pretrained(
-    "Tongyi-MAI/Z-Image-Turbo",
-    torch_dtype=torch.bfloat16,
-    low_cpu_mem_usage=False,
-)
-pipe.to("cuda")
-
-# [Optional] Attention Backend
-# Diffusers uses SDPA by default. Switch to Flash Attention for better efficiency if supported:
-# pipe.transformer.set_attention_backend("flash")    # Enable Flash-Attention-2
-# pipe.transformer.set_attention_backend("_flash_3") # Enable Flash-Attention-3
-
-# [Optional] Model Compilation
-# Compiling the DiT model accelerates inference, but the first run will take longer to compile.
-# pipe.transformer.compile()
-
-# [Optional] CPU Offloading
-# Enable CPU offloading for memory-constrained devices.
-# pipe.enable_model_cpu_offload()
-
-prompt = "Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights."
-
-# 2. Generate Image
-image = pipe(
-    prompt=prompt,
-    height=1024,
-    width=1024,
-    num_inference_steps=9,  # This actually results in 8 DiT forwards
-    guidance_scale=0.0,     # Guidance should be 0 for the Turbo models
-    generator=torch.Generator("cuda").manual_seed(42),
-).images[0]
-
-image.save("example.png")
-```
-
-</details>
-
-<details>
-<summary><b>Z-Image</b> - Click to expand</summary>
-
-Recommended Parameters:
-- **Resolution:** 512×512 to 2048×2048 (total pixel area, any aspect ratio)
-- **Guidance scale:** 3.0 – 5.0
-- **Inference steps:** 28 – 50
-- **Negative prompts:** Strongly recommended for better control
-- **CFG normalization:** `False` for general stylism, `True` for realism
-
-Then, try the following code to generate an image:
-```python
-import torch
-from diffusers import ZImagePipeline
-
-# Load the pipeline
-pipe = ZImagePipeline.from_pretrained(
-    "Tongyi-MAI/Z-Image",
-    torch_dtype=torch.bfloat16,
-    low_cpu_mem_usage=False,
-)
-pipe.to("cuda")
-
-# Generate image
-prompt = "两名年轻亚裔女性紧密站在一起，背景为朴素的灰色纹理墙面，可能是室内地毯地面。左侧女性留着长卷发，身穿藏青色毛衣，左袖有奶油色褶皱装饰，内搭白色立领衬衫，下身白色裤子；佩戴小巧金色耳钉，双臂交叉于背后。右侧女性留直肩长发，身穿奶油色卫衣，胸前印有"Tun the tables"字样，下方为"New ideas"，搭配白色裤子；佩戴银色小环耳环，双臂交叉于胸前。两人均面带微笑直视镜头。照片，自然光照明，柔和阴影，以藏青、奶油白为主的中性色调，休闲时尚摄影，中等景深，面部和上半身对焦清晰，姿态放松，表情友好，室内环境，地毯地面，纯色背景。"
-negative_prompt = "" # Optional, but would be powerful when you want to remove some unwanted content
-
-image = pipe(
-    prompt=prompt,
-    negative_prompt=negative_prompt,
-    height=1280,
-    width=720,
-    cfg_normalization=False,
-    num_inference_steps=50,
-    guidance_scale=4,
-    generator=torch.Generator("cuda").manual_seed(42),
-).images[0]
-
-image.save("example.png")
-```
-
-</details>
+Useful flags:
+- `--steps 8 --guidance 0.0` for `Z-Image-Turbo`
+- `--steps 28 --guidance 4.0 --negative-prompt "..."` for `Z-Image`
+- `--device auto|cuda|mps|cpu`
+- `--dtype auto|bfloat16|float16|float32`
 
 ## 🔬 Decoupled-DMD: The Acceleration Magic Behind Z-Image
 

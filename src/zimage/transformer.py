@@ -1,4 +1,4 @@
-"""Z-Image Transformer."""
+"""Z-Image transformer blocks used by the minimal inference script."""
 
 import math
 from typing import List, Optional, Tuple
@@ -8,15 +8,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
-from config import (
-    ADALN_EMBED_DIM,
-    FREQUENCY_EMBEDDING_SIZE,
-    MAX_PERIOD,
-    ROPE_AXES_DIMS,
-    ROPE_AXES_LENS,
-    ROPE_THETA,
-    SEQ_MULTI_OF,
-)
+ADALN_EMBED_DIM = 256
+FREQUENCY_EMBEDDING_SIZE = 256
+MAX_PERIOD = 10000
+ROPE_THETA = 256.0
+ROPE_AXES_DIMS = [32, 48, 48]
+ROPE_AXES_LENS = [1536, 512, 512]
+SEQ_MULTI_OF = 32
 
 
 class TimestepEmbedder(nn.Module):
@@ -123,18 +121,24 @@ class ZImageAttention(nn.Module):
             query = apply_rotary_emb(query, freqs_cis)
             key = apply_rotary_emb(key, freqs_cis)
 
-        dtype = query.dtype
-        query, key = query.to(dtype), key.to(dtype)
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
 
-        # Dispatch
-        from utils.attention import dispatch_attention
+        if attention_mask is not None and attention_mask.ndim == 2:
+            attention_mask = attention_mask[:, None, None, :]
 
-        hidden_states = dispatch_attention(
-            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False, backend=self._attention_backend
+        hidden_states = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            enable_gqa=self.n_heads != self.n_kv_heads,
         )
 
-        hidden_states = hidden_states.flatten(2, 3)
-        hidden_states = hidden_states.to(dtype)
+        hidden_states = hidden_states.transpose(1, 2).flatten(2, 3).to(query.dtype)
 
         output = self.to_out[0](hidden_states)
         return output

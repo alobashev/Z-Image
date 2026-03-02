@@ -5,17 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "zimage-native"
 version = "0.1.0"
-description = "Z-Image PyTorch Native Implementation"
+description = "Minimal local PyTorch inference for Z-Image"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.5.0",
     "transformers>=4.51.0",
     "safetensors",
-    "loguru",
-    "pillow",
-    "accelerate",
-    "huggingface_hub>=0.25.0"
+    "pillow"
 ]
 
 [project.optional-dependencies]

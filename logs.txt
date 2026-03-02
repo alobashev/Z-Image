@@ -1,0 +1,925 @@
+(base) ubuntu@computeinstance-u00gg631ww32przn3x:/mnt/shared/workspace/alobashev/mobileI2V/z-image-on-device/Z-Image-minimal$ CUDA_VISIBLE_DEVICES=4 python3 inference-sequential.py   --model models/Z-Image-Turbo   --output output.png   --steps 8   --guidance 0.0   "Movie still, wide-angle cafe vignette: a platinum-blonde woman with a spiky top-knot leans over a marble table and sips a heart-topped latte from a mint-green cup, peering mischievously above burgundy cat-eye glasses while her ring-laden fingers frame the foam art and city life bustles just beyond the open window."
+Loading checkpoint shards: 100%|███████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:00<00:00, 70.07it/s]
+layer6_attn.shape: torch.Size([1, 30, 4192, 128])
+
+
+Analyzing layer10
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_mod = torch.matmul(adaln_input, self.layer10_adaln_weight.t()) + self.layer10_adaln_bias
+                >>>layer10_mod.shape=torch.Size([1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_mod = layer10_mod.unsqueeze(1)
+                >>>layer10_mod.shape=torch.Size([1, 1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_scale_msa, layer10_gate_msa, layer10_scale_mlp, layer10_gate_mlp = layer10_mod.chunk(4, dim=2)
+layer10_gate_msa = torch.tanh(layer10_gate_msa)
+                >>>layer10_gate_msa.shape=torch.Size([1, 1, 3840]), layer10_gate_msa.dtype=torch.bfloat16
+layer10_gate_mlp = torch.tanh(layer10_gate_mlp)
+                >>>layer10_gate_mlp.shape=torch.Size([1, 1, 3840]), layer10_gate_mlp.dtype=torch.bfloat16
+layer10_scale_msa = 1.0 + layer10_scale_msa
+                >>>layer10_scale_msa.shape=torch.Size([1, 1, 3840]), layer10_scale_msa.dtype=torch.bfloat16
+layer10_scale_mlp = 1.0 + layer10_scale_mlp
+                >>>layer10_scale_mlp.shape=torch.Size([1, 1, 3840]), layer10_scale_mlp.dtype=torch.bfloat16
+layer10_attn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm1_weight
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_attn_in = layer10_attn_in * layer10_scale_msa
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_q = torch.matmul(layer10_attn_in, self.layer10_attention_to_q_weight.t())
+                >>>layer10_q.shape=torch.Size([1, 4192, 3840]), layer10_q.dtype=torch.bfloat16
+layer10_k = torch.matmul(layer10_attn_in, self.layer10_attention_to_k_weight.t())
+                >>>layer10_k.shape=torch.Size([1, 4192, 3840]), layer10_k.dtype=torch.bfloat16
+layer10_v = torch.matmul(layer10_attn_in, self.layer10_attention_to_v_weight.t())
+                >>>layer10_v.shape=torch.Size([1, 4192, 3840]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q.view(1, unified_state.shape[1], self.n_heads, self.head_dim)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_v.shape=torch.Size([1, 4192, 30, 128]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q * torch.rsqrt(layer10_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_q_weight.view(1, 1, 1, -1)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k * torch.rsqrt(layer10_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_k_weight.view(1, 1, 1, -1)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_cos.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_cos.dtype=torch.bfloat16
+layer10_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_sin.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_sin.dtype=torch.bfloat16
+layer10_q_even = layer10_q[..., 0::2]
+                >>>layer10_q_even.shape=torch.Size([1, 4192, 30, 64]), layer10_q_even.dtype=torch.bfloat16
+layer10_q_odd = layer10_q[..., 1::2]
+                >>>layer10_q_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_q_odd.dtype=torch.bfloat16
+layer10_q = torch.stack([layer10_q_even * layer10_freqs_cos - layer10_q_odd * layer10_freqs_sin, layer10_q_even * layer10_freqs_sin + layer10_q_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k_even = layer10_k[..., 0::2]
+                >>>layer10_k_even.shape=torch.Size([1, 4192, 30, 64]), layer10_k_even.dtype=torch.bfloat16
+layer10_k_odd = layer10_k[..., 1::2]
+                >>>layer10_k_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_k_odd.dtype=torch.bfloat16
+layer10_k = torch.stack([layer10_k_even * layer10_freqs_cos - layer10_k_odd * layer10_freqs_sin, layer10_k_even * layer10_freqs_sin + layer10_k_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_q = layer10_q.transpose(1, 2)
+                >>>layer10_q.shape=torch.Size([1, 30, 4192, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.transpose(1, 2)
+                >>>layer10_k.shape=torch.Size([1, 30, 4192, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.transpose(1, 2)
+                >>>layer10_v.shape=torch.Size([1, 30, 4192, 128]), layer10_v.dtype=torch.bfloat16
+layer10_scores = torch.matmul(layer10_q.float(), layer10_k.float().transpose(-2, -1)) * self.attention_scale
+                >>>layer10_scores.shape=torch.Size([1, 30, 4192, 4192]), layer10_scores.dtype=torch.float32
+layer10_probs = torch.softmax(layer10_scores, dim=-1).to(layer10_v.dtype)
+                >>>layer10_probs.shape=torch.Size([1, 30, 4192, 4192]), layer10_probs.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_probs, layer10_v)
+                >>>layer10_attn.shape=torch.Size([1, 30, 4192, 128]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_msa * layer10_attn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm1_weight
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_in = layer10_ffn_in * layer10_scale_mlp
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_a = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w1_weight.t())
+                >>>layer10_ffn_a.shape=torch.Size([1, 4192, 10240]), layer10_ffn_a.dtype=torch.bfloat16
+layer10_ffn_b = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w3_weight.t())
+                >>>layer10_ffn_b.shape=torch.Size([1, 4192, 10240]), layer10_ffn_b.dtype=torch.bfloat16
+layer10_ffn = F.silu(layer10_ffn_a) * layer10_ffn
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 10240]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = torch.matmul(layer10_ffn, self.layer10_feed_forward_w2_weight.t())
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = layer10_ffn * torch.rsqrt(layer10_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm2_weight
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_mlp * layer10_ffn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer6_attn.shape: torch.Size([1, 30, 4192, 128])
+
+
+Analyzing layer10
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_mod = torch.matmul(adaln_input, self.layer10_adaln_weight.t()) + self.layer10_adaln_bias
+                >>>layer10_mod.shape=torch.Size([1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_mod = layer10_mod.unsqueeze(1)
+                >>>layer10_mod.shape=torch.Size([1, 1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_scale_msa, layer10_gate_msa, layer10_scale_mlp, layer10_gate_mlp = layer10_mod.chunk(4, dim=2)
+layer10_gate_msa = torch.tanh(layer10_gate_msa)
+                >>>layer10_gate_msa.shape=torch.Size([1, 1, 3840]), layer10_gate_msa.dtype=torch.bfloat16
+layer10_gate_mlp = torch.tanh(layer10_gate_mlp)
+                >>>layer10_gate_mlp.shape=torch.Size([1, 1, 3840]), layer10_gate_mlp.dtype=torch.bfloat16
+layer10_scale_msa = 1.0 + layer10_scale_msa
+                >>>layer10_scale_msa.shape=torch.Size([1, 1, 3840]), layer10_scale_msa.dtype=torch.bfloat16
+layer10_scale_mlp = 1.0 + layer10_scale_mlp
+                >>>layer10_scale_mlp.shape=torch.Size([1, 1, 3840]), layer10_scale_mlp.dtype=torch.bfloat16
+layer10_attn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm1_weight
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_attn_in = layer10_attn_in * layer10_scale_msa
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_q = torch.matmul(layer10_attn_in, self.layer10_attention_to_q_weight.t())
+                >>>layer10_q.shape=torch.Size([1, 4192, 3840]), layer10_q.dtype=torch.bfloat16
+layer10_k = torch.matmul(layer10_attn_in, self.layer10_attention_to_k_weight.t())
+                >>>layer10_k.shape=torch.Size([1, 4192, 3840]), layer10_k.dtype=torch.bfloat16
+layer10_v = torch.matmul(layer10_attn_in, self.layer10_attention_to_v_weight.t())
+                >>>layer10_v.shape=torch.Size([1, 4192, 3840]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q.view(1, unified_state.shape[1], self.n_heads, self.head_dim)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_v.shape=torch.Size([1, 4192, 30, 128]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q * torch.rsqrt(layer10_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_q_weight.view(1, 1, 1, -1)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k * torch.rsqrt(layer10_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_k_weight.view(1, 1, 1, -1)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_cos.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_cos.dtype=torch.bfloat16
+layer10_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_sin.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_sin.dtype=torch.bfloat16
+layer10_q_even = layer10_q[..., 0::2]
+                >>>layer10_q_even.shape=torch.Size([1, 4192, 30, 64]), layer10_q_even.dtype=torch.bfloat16
+layer10_q_odd = layer10_q[..., 1::2]
+                >>>layer10_q_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_q_odd.dtype=torch.bfloat16
+layer10_q = torch.stack([layer10_q_even * layer10_freqs_cos - layer10_q_odd * layer10_freqs_sin, layer10_q_even * layer10_freqs_sin + layer10_q_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k_even = layer10_k[..., 0::2]
+                >>>layer10_k_even.shape=torch.Size([1, 4192, 30, 64]), layer10_k_even.dtype=torch.bfloat16
+layer10_k_odd = layer10_k[..., 1::2]
+                >>>layer10_k_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_k_odd.dtype=torch.bfloat16
+layer10_k = torch.stack([layer10_k_even * layer10_freqs_cos - layer10_k_odd * layer10_freqs_sin, layer10_k_even * layer10_freqs_sin + layer10_k_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_q = layer10_q.transpose(1, 2)
+                >>>layer10_q.shape=torch.Size([1, 30, 4192, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.transpose(1, 2)
+                >>>layer10_k.shape=torch.Size([1, 30, 4192, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.transpose(1, 2)
+                >>>layer10_v.shape=torch.Size([1, 30, 4192, 128]), layer10_v.dtype=torch.bfloat16
+layer10_scores = torch.matmul(layer10_q.float(), layer10_k.float().transpose(-2, -1)) * self.attention_scale
+                >>>layer10_scores.shape=torch.Size([1, 30, 4192, 4192]), layer10_scores.dtype=torch.float32
+layer10_probs = torch.softmax(layer10_scores, dim=-1).to(layer10_v.dtype)
+                >>>layer10_probs.shape=torch.Size([1, 30, 4192, 4192]), layer10_probs.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_probs, layer10_v)
+                >>>layer10_attn.shape=torch.Size([1, 30, 4192, 128]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_msa * layer10_attn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm1_weight
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_in = layer10_ffn_in * layer10_scale_mlp
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_a = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w1_weight.t())
+                >>>layer10_ffn_a.shape=torch.Size([1, 4192, 10240]), layer10_ffn_a.dtype=torch.bfloat16
+layer10_ffn_b = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w3_weight.t())
+                >>>layer10_ffn_b.shape=torch.Size([1, 4192, 10240]), layer10_ffn_b.dtype=torch.bfloat16
+layer10_ffn = F.silu(layer10_ffn_a) * layer10_ffn
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 10240]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = torch.matmul(layer10_ffn, self.layer10_feed_forward_w2_weight.t())
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = layer10_ffn * torch.rsqrt(layer10_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm2_weight
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_mlp * layer10_ffn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer6_attn.shape: torch.Size([1, 30, 4192, 128])
+
+
+Analyzing layer10
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_mod = torch.matmul(adaln_input, self.layer10_adaln_weight.t()) + self.layer10_adaln_bias
+                >>>layer10_mod.shape=torch.Size([1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_mod = layer10_mod.unsqueeze(1)
+                >>>layer10_mod.shape=torch.Size([1, 1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_scale_msa, layer10_gate_msa, layer10_scale_mlp, layer10_gate_mlp = layer10_mod.chunk(4, dim=2)
+layer10_gate_msa = torch.tanh(layer10_gate_msa)
+                >>>layer10_gate_msa.shape=torch.Size([1, 1, 3840]), layer10_gate_msa.dtype=torch.bfloat16
+layer10_gate_mlp = torch.tanh(layer10_gate_mlp)
+                >>>layer10_gate_mlp.shape=torch.Size([1, 1, 3840]), layer10_gate_mlp.dtype=torch.bfloat16
+layer10_scale_msa = 1.0 + layer10_scale_msa
+                >>>layer10_scale_msa.shape=torch.Size([1, 1, 3840]), layer10_scale_msa.dtype=torch.bfloat16
+layer10_scale_mlp = 1.0 + layer10_scale_mlp
+                >>>layer10_scale_mlp.shape=torch.Size([1, 1, 3840]), layer10_scale_mlp.dtype=torch.bfloat16
+layer10_attn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm1_weight
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_attn_in = layer10_attn_in * layer10_scale_msa
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_q = torch.matmul(layer10_attn_in, self.layer10_attention_to_q_weight.t())
+                >>>layer10_q.shape=torch.Size([1, 4192, 3840]), layer10_q.dtype=torch.bfloat16
+layer10_k = torch.matmul(layer10_attn_in, self.layer10_attention_to_k_weight.t())
+                >>>layer10_k.shape=torch.Size([1, 4192, 3840]), layer10_k.dtype=torch.bfloat16
+layer10_v = torch.matmul(layer10_attn_in, self.layer10_attention_to_v_weight.t())
+                >>>layer10_v.shape=torch.Size([1, 4192, 3840]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q.view(1, unified_state.shape[1], self.n_heads, self.head_dim)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_v.shape=torch.Size([1, 4192, 30, 128]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q * torch.rsqrt(layer10_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_q_weight.view(1, 1, 1, -1)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k * torch.rsqrt(layer10_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_k_weight.view(1, 1, 1, -1)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_cos.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_cos.dtype=torch.bfloat16
+layer10_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_sin.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_sin.dtype=torch.bfloat16
+layer10_q_even = layer10_q[..., 0::2]
+                >>>layer10_q_even.shape=torch.Size([1, 4192, 30, 64]), layer10_q_even.dtype=torch.bfloat16
+layer10_q_odd = layer10_q[..., 1::2]
+                >>>layer10_q_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_q_odd.dtype=torch.bfloat16
+layer10_q = torch.stack([layer10_q_even * layer10_freqs_cos - layer10_q_odd * layer10_freqs_sin, layer10_q_even * layer10_freqs_sin + layer10_q_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k_even = layer10_k[..., 0::2]
+                >>>layer10_k_even.shape=torch.Size([1, 4192, 30, 64]), layer10_k_even.dtype=torch.bfloat16
+layer10_k_odd = layer10_k[..., 1::2]
+                >>>layer10_k_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_k_odd.dtype=torch.bfloat16
+layer10_k = torch.stack([layer10_k_even * layer10_freqs_cos - layer10_k_odd * layer10_freqs_sin, layer10_k_even * layer10_freqs_sin + layer10_k_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_q = layer10_q.transpose(1, 2)
+                >>>layer10_q.shape=torch.Size([1, 30, 4192, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.transpose(1, 2)
+                >>>layer10_k.shape=torch.Size([1, 30, 4192, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.transpose(1, 2)
+                >>>layer10_v.shape=torch.Size([1, 30, 4192, 128]), layer10_v.dtype=torch.bfloat16
+layer10_scores = torch.matmul(layer10_q.float(), layer10_k.float().transpose(-2, -1)) * self.attention_scale
+                >>>layer10_scores.shape=torch.Size([1, 30, 4192, 4192]), layer10_scores.dtype=torch.float32
+layer10_probs = torch.softmax(layer10_scores, dim=-1).to(layer10_v.dtype)
+                >>>layer10_probs.shape=torch.Size([1, 30, 4192, 4192]), layer10_probs.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_probs, layer10_v)
+                >>>layer10_attn.shape=torch.Size([1, 30, 4192, 128]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_msa * layer10_attn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm1_weight
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_in = layer10_ffn_in * layer10_scale_mlp
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_a = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w1_weight.t())
+                >>>layer10_ffn_a.shape=torch.Size([1, 4192, 10240]), layer10_ffn_a.dtype=torch.bfloat16
+layer10_ffn_b = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w3_weight.t())
+                >>>layer10_ffn_b.shape=torch.Size([1, 4192, 10240]), layer10_ffn_b.dtype=torch.bfloat16
+layer10_ffn = F.silu(layer10_ffn_a) * layer10_ffn
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 10240]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = torch.matmul(layer10_ffn, self.layer10_feed_forward_w2_weight.t())
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = layer10_ffn * torch.rsqrt(layer10_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm2_weight
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_mlp * layer10_ffn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer6_attn.shape: torch.Size([1, 30, 4192, 128])
+
+
+Analyzing layer10
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_mod = torch.matmul(adaln_input, self.layer10_adaln_weight.t()) + self.layer10_adaln_bias
+                >>>layer10_mod.shape=torch.Size([1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_mod = layer10_mod.unsqueeze(1)
+                >>>layer10_mod.shape=torch.Size([1, 1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_scale_msa, layer10_gate_msa, layer10_scale_mlp, layer10_gate_mlp = layer10_mod.chunk(4, dim=2)
+layer10_gate_msa = torch.tanh(layer10_gate_msa)
+                >>>layer10_gate_msa.shape=torch.Size([1, 1, 3840]), layer10_gate_msa.dtype=torch.bfloat16
+layer10_gate_mlp = torch.tanh(layer10_gate_mlp)
+                >>>layer10_gate_mlp.shape=torch.Size([1, 1, 3840]), layer10_gate_mlp.dtype=torch.bfloat16
+layer10_scale_msa = 1.0 + layer10_scale_msa
+                >>>layer10_scale_msa.shape=torch.Size([1, 1, 3840]), layer10_scale_msa.dtype=torch.bfloat16
+layer10_scale_mlp = 1.0 + layer10_scale_mlp
+                >>>layer10_scale_mlp.shape=torch.Size([1, 1, 3840]), layer10_scale_mlp.dtype=torch.bfloat16
+layer10_attn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm1_weight
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_attn_in = layer10_attn_in * layer10_scale_msa
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_q = torch.matmul(layer10_attn_in, self.layer10_attention_to_q_weight.t())
+                >>>layer10_q.shape=torch.Size([1, 4192, 3840]), layer10_q.dtype=torch.bfloat16
+layer10_k = torch.matmul(layer10_attn_in, self.layer10_attention_to_k_weight.t())
+                >>>layer10_k.shape=torch.Size([1, 4192, 3840]), layer10_k.dtype=torch.bfloat16
+layer10_v = torch.matmul(layer10_attn_in, self.layer10_attention_to_v_weight.t())
+                >>>layer10_v.shape=torch.Size([1, 4192, 3840]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q.view(1, unified_state.shape[1], self.n_heads, self.head_dim)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_v.shape=torch.Size([1, 4192, 30, 128]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q * torch.rsqrt(layer10_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_q_weight.view(1, 1, 1, -1)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k * torch.rsqrt(layer10_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_k_weight.view(1, 1, 1, -1)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_cos.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_cos.dtype=torch.bfloat16
+layer10_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_sin.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_sin.dtype=torch.bfloat16
+layer10_q_even = layer10_q[..., 0::2]
+                >>>layer10_q_even.shape=torch.Size([1, 4192, 30, 64]), layer10_q_even.dtype=torch.bfloat16
+layer10_q_odd = layer10_q[..., 1::2]
+                >>>layer10_q_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_q_odd.dtype=torch.bfloat16
+layer10_q = torch.stack([layer10_q_even * layer10_freqs_cos - layer10_q_odd * layer10_freqs_sin, layer10_q_even * layer10_freqs_sin + layer10_q_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k_even = layer10_k[..., 0::2]
+                >>>layer10_k_even.shape=torch.Size([1, 4192, 30, 64]), layer10_k_even.dtype=torch.bfloat16
+layer10_k_odd = layer10_k[..., 1::2]
+                >>>layer10_k_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_k_odd.dtype=torch.bfloat16
+layer10_k = torch.stack([layer10_k_even * layer10_freqs_cos - layer10_k_odd * layer10_freqs_sin, layer10_k_even * layer10_freqs_sin + layer10_k_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_q = layer10_q.transpose(1, 2)
+                >>>layer10_q.shape=torch.Size([1, 30, 4192, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.transpose(1, 2)
+                >>>layer10_k.shape=torch.Size([1, 30, 4192, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.transpose(1, 2)
+                >>>layer10_v.shape=torch.Size([1, 30, 4192, 128]), layer10_v.dtype=torch.bfloat16
+layer10_scores = torch.matmul(layer10_q.float(), layer10_k.float().transpose(-2, -1)) * self.attention_scale
+                >>>layer10_scores.shape=torch.Size([1, 30, 4192, 4192]), layer10_scores.dtype=torch.float32
+layer10_probs = torch.softmax(layer10_scores, dim=-1).to(layer10_v.dtype)
+                >>>layer10_probs.shape=torch.Size([1, 30, 4192, 4192]), layer10_probs.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_probs, layer10_v)
+                >>>layer10_attn.shape=torch.Size([1, 30, 4192, 128]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_msa * layer10_attn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm1_weight
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_in = layer10_ffn_in * layer10_scale_mlp
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_a = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w1_weight.t())
+                >>>layer10_ffn_a.shape=torch.Size([1, 4192, 10240]), layer10_ffn_a.dtype=torch.bfloat16
+layer10_ffn_b = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w3_weight.t())
+                >>>layer10_ffn_b.shape=torch.Size([1, 4192, 10240]), layer10_ffn_b.dtype=torch.bfloat16
+layer10_ffn = F.silu(layer10_ffn_a) * layer10_ffn
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 10240]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = torch.matmul(layer10_ffn, self.layer10_feed_forward_w2_weight.t())
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = layer10_ffn * torch.rsqrt(layer10_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm2_weight
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_mlp * layer10_ffn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer6_attn.shape: torch.Size([1, 30, 4192, 128])
+
+
+Analyzing layer10
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_mod = torch.matmul(adaln_input, self.layer10_adaln_weight.t()) + self.layer10_adaln_bias
+                >>>layer10_mod.shape=torch.Size([1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_mod = layer10_mod.unsqueeze(1)
+                >>>layer10_mod.shape=torch.Size([1, 1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_scale_msa, layer10_gate_msa, layer10_scale_mlp, layer10_gate_mlp = layer10_mod.chunk(4, dim=2)
+layer10_gate_msa = torch.tanh(layer10_gate_msa)
+                >>>layer10_gate_msa.shape=torch.Size([1, 1, 3840]), layer10_gate_msa.dtype=torch.bfloat16
+layer10_gate_mlp = torch.tanh(layer10_gate_mlp)
+                >>>layer10_gate_mlp.shape=torch.Size([1, 1, 3840]), layer10_gate_mlp.dtype=torch.bfloat16
+layer10_scale_msa = 1.0 + layer10_scale_msa
+                >>>layer10_scale_msa.shape=torch.Size([1, 1, 3840]), layer10_scale_msa.dtype=torch.bfloat16
+layer10_scale_mlp = 1.0 + layer10_scale_mlp
+                >>>layer10_scale_mlp.shape=torch.Size([1, 1, 3840]), layer10_scale_mlp.dtype=torch.bfloat16
+layer10_attn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm1_weight
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_attn_in = layer10_attn_in * layer10_scale_msa
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_q = torch.matmul(layer10_attn_in, self.layer10_attention_to_q_weight.t())
+                >>>layer10_q.shape=torch.Size([1, 4192, 3840]), layer10_q.dtype=torch.bfloat16
+layer10_k = torch.matmul(layer10_attn_in, self.layer10_attention_to_k_weight.t())
+                >>>layer10_k.shape=torch.Size([1, 4192, 3840]), layer10_k.dtype=torch.bfloat16
+layer10_v = torch.matmul(layer10_attn_in, self.layer10_attention_to_v_weight.t())
+                >>>layer10_v.shape=torch.Size([1, 4192, 3840]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q.view(1, unified_state.shape[1], self.n_heads, self.head_dim)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_v.shape=torch.Size([1, 4192, 30, 128]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q * torch.rsqrt(layer10_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_q_weight.view(1, 1, 1, -1)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k * torch.rsqrt(layer10_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_k_weight.view(1, 1, 1, -1)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_cos.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_cos.dtype=torch.bfloat16
+layer10_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_sin.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_sin.dtype=torch.bfloat16
+layer10_q_even = layer10_q[..., 0::2]
+                >>>layer10_q_even.shape=torch.Size([1, 4192, 30, 64]), layer10_q_even.dtype=torch.bfloat16
+layer10_q_odd = layer10_q[..., 1::2]
+                >>>layer10_q_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_q_odd.dtype=torch.bfloat16
+layer10_q = torch.stack([layer10_q_even * layer10_freqs_cos - layer10_q_odd * layer10_freqs_sin, layer10_q_even * layer10_freqs_sin + layer10_q_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k_even = layer10_k[..., 0::2]
+                >>>layer10_k_even.shape=torch.Size([1, 4192, 30, 64]), layer10_k_even.dtype=torch.bfloat16
+layer10_k_odd = layer10_k[..., 1::2]
+                >>>layer10_k_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_k_odd.dtype=torch.bfloat16
+layer10_k = torch.stack([layer10_k_even * layer10_freqs_cos - layer10_k_odd * layer10_freqs_sin, layer10_k_even * layer10_freqs_sin + layer10_k_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_q = layer10_q.transpose(1, 2)
+                >>>layer10_q.shape=torch.Size([1, 30, 4192, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.transpose(1, 2)
+                >>>layer10_k.shape=torch.Size([1, 30, 4192, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.transpose(1, 2)
+                >>>layer10_v.shape=torch.Size([1, 30, 4192, 128]), layer10_v.dtype=torch.bfloat16
+layer10_scores = torch.matmul(layer10_q.float(), layer10_k.float().transpose(-2, -1)) * self.attention_scale
+                >>>layer10_scores.shape=torch.Size([1, 30, 4192, 4192]), layer10_scores.dtype=torch.float32
+layer10_probs = torch.softmax(layer10_scores, dim=-1).to(layer10_v.dtype)
+                >>>layer10_probs.shape=torch.Size([1, 30, 4192, 4192]), layer10_probs.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_probs, layer10_v)
+                >>>layer10_attn.shape=torch.Size([1, 30, 4192, 128]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_msa * layer10_attn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm1_weight
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_in = layer10_ffn_in * layer10_scale_mlp
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_a = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w1_weight.t())
+                >>>layer10_ffn_a.shape=torch.Size([1, 4192, 10240]), layer10_ffn_a.dtype=torch.bfloat16
+layer10_ffn_b = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w3_weight.t())
+                >>>layer10_ffn_b.shape=torch.Size([1, 4192, 10240]), layer10_ffn_b.dtype=torch.bfloat16
+layer10_ffn = F.silu(layer10_ffn_a) * layer10_ffn
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 10240]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = torch.matmul(layer10_ffn, self.layer10_feed_forward_w2_weight.t())
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = layer10_ffn * torch.rsqrt(layer10_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm2_weight
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_mlp * layer10_ffn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer6_attn.shape: torch.Size([1, 30, 4192, 128])
+
+
+Analyzing layer10
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_mod = torch.matmul(adaln_input, self.layer10_adaln_weight.t()) + self.layer10_adaln_bias
+                >>>layer10_mod.shape=torch.Size([1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_mod = layer10_mod.unsqueeze(1)
+                >>>layer10_mod.shape=torch.Size([1, 1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_scale_msa, layer10_gate_msa, layer10_scale_mlp, layer10_gate_mlp = layer10_mod.chunk(4, dim=2)
+layer10_gate_msa = torch.tanh(layer10_gate_msa)
+                >>>layer10_gate_msa.shape=torch.Size([1, 1, 3840]), layer10_gate_msa.dtype=torch.bfloat16
+layer10_gate_mlp = torch.tanh(layer10_gate_mlp)
+                >>>layer10_gate_mlp.shape=torch.Size([1, 1, 3840]), layer10_gate_mlp.dtype=torch.bfloat16
+layer10_scale_msa = 1.0 + layer10_scale_msa
+                >>>layer10_scale_msa.shape=torch.Size([1, 1, 3840]), layer10_scale_msa.dtype=torch.bfloat16
+layer10_scale_mlp = 1.0 + layer10_scale_mlp
+                >>>layer10_scale_mlp.shape=torch.Size([1, 1, 3840]), layer10_scale_mlp.dtype=torch.bfloat16
+layer10_attn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm1_weight
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_attn_in = layer10_attn_in * layer10_scale_msa
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_q = torch.matmul(layer10_attn_in, self.layer10_attention_to_q_weight.t())
+                >>>layer10_q.shape=torch.Size([1, 4192, 3840]), layer10_q.dtype=torch.bfloat16
+layer10_k = torch.matmul(layer10_attn_in, self.layer10_attention_to_k_weight.t())
+                >>>layer10_k.shape=torch.Size([1, 4192, 3840]), layer10_k.dtype=torch.bfloat16
+layer10_v = torch.matmul(layer10_attn_in, self.layer10_attention_to_v_weight.t())
+                >>>layer10_v.shape=torch.Size([1, 4192, 3840]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q.view(1, unified_state.shape[1], self.n_heads, self.head_dim)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_v.shape=torch.Size([1, 4192, 30, 128]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q * torch.rsqrt(layer10_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_q_weight.view(1, 1, 1, -1)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k * torch.rsqrt(layer10_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_k_weight.view(1, 1, 1, -1)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_cos.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_cos.dtype=torch.bfloat16
+layer10_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_sin.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_sin.dtype=torch.bfloat16
+layer10_q_even = layer10_q[..., 0::2]
+                >>>layer10_q_even.shape=torch.Size([1, 4192, 30, 64]), layer10_q_even.dtype=torch.bfloat16
+layer10_q_odd = layer10_q[..., 1::2]
+                >>>layer10_q_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_q_odd.dtype=torch.bfloat16
+layer10_q = torch.stack([layer10_q_even * layer10_freqs_cos - layer10_q_odd * layer10_freqs_sin, layer10_q_even * layer10_freqs_sin + layer10_q_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k_even = layer10_k[..., 0::2]
+                >>>layer10_k_even.shape=torch.Size([1, 4192, 30, 64]), layer10_k_even.dtype=torch.bfloat16
+layer10_k_odd = layer10_k[..., 1::2]
+                >>>layer10_k_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_k_odd.dtype=torch.bfloat16
+layer10_k = torch.stack([layer10_k_even * layer10_freqs_cos - layer10_k_odd * layer10_freqs_sin, layer10_k_even * layer10_freqs_sin + layer10_k_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_q = layer10_q.transpose(1, 2)
+                >>>layer10_q.shape=torch.Size([1, 30, 4192, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.transpose(1, 2)
+                >>>layer10_k.shape=torch.Size([1, 30, 4192, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.transpose(1, 2)
+                >>>layer10_v.shape=torch.Size([1, 30, 4192, 128]), layer10_v.dtype=torch.bfloat16
+layer10_scores = torch.matmul(layer10_q.float(), layer10_k.float().transpose(-2, -1)) * self.attention_scale
+                >>>layer10_scores.shape=torch.Size([1, 30, 4192, 4192]), layer10_scores.dtype=torch.float32
+layer10_probs = torch.softmax(layer10_scores, dim=-1).to(layer10_v.dtype)
+                >>>layer10_probs.shape=torch.Size([1, 30, 4192, 4192]), layer10_probs.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_probs, layer10_v)
+                >>>layer10_attn.shape=torch.Size([1, 30, 4192, 128]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_msa * layer10_attn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm1_weight
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_in = layer10_ffn_in * layer10_scale_mlp
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_a = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w1_weight.t())
+                >>>layer10_ffn_a.shape=torch.Size([1, 4192, 10240]), layer10_ffn_a.dtype=torch.bfloat16
+layer10_ffn_b = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w3_weight.t())
+                >>>layer10_ffn_b.shape=torch.Size([1, 4192, 10240]), layer10_ffn_b.dtype=torch.bfloat16
+layer10_ffn = F.silu(layer10_ffn_a) * layer10_ffn
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 10240]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = torch.matmul(layer10_ffn, self.layer10_feed_forward_w2_weight.t())
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = layer10_ffn * torch.rsqrt(layer10_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm2_weight
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_mlp * layer10_ffn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer6_attn.shape: torch.Size([1, 30, 4192, 128])
+
+
+Analyzing layer10
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_mod = torch.matmul(adaln_input, self.layer10_adaln_weight.t()) + self.layer10_adaln_bias
+                >>>layer10_mod.shape=torch.Size([1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_mod = layer10_mod.unsqueeze(1)
+                >>>layer10_mod.shape=torch.Size([1, 1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_scale_msa, layer10_gate_msa, layer10_scale_mlp, layer10_gate_mlp = layer10_mod.chunk(4, dim=2)
+layer10_gate_msa = torch.tanh(layer10_gate_msa)
+                >>>layer10_gate_msa.shape=torch.Size([1, 1, 3840]), layer10_gate_msa.dtype=torch.bfloat16
+layer10_gate_mlp = torch.tanh(layer10_gate_mlp)
+                >>>layer10_gate_mlp.shape=torch.Size([1, 1, 3840]), layer10_gate_mlp.dtype=torch.bfloat16
+layer10_scale_msa = 1.0 + layer10_scale_msa
+                >>>layer10_scale_msa.shape=torch.Size([1, 1, 3840]), layer10_scale_msa.dtype=torch.bfloat16
+layer10_scale_mlp = 1.0 + layer10_scale_mlp
+                >>>layer10_scale_mlp.shape=torch.Size([1, 1, 3840]), layer10_scale_mlp.dtype=torch.bfloat16
+layer10_attn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm1_weight
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_attn_in = layer10_attn_in * layer10_scale_msa
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_q = torch.matmul(layer10_attn_in, self.layer10_attention_to_q_weight.t())
+                >>>layer10_q.shape=torch.Size([1, 4192, 3840]), layer10_q.dtype=torch.bfloat16
+layer10_k = torch.matmul(layer10_attn_in, self.layer10_attention_to_k_weight.t())
+                >>>layer10_k.shape=torch.Size([1, 4192, 3840]), layer10_k.dtype=torch.bfloat16
+layer10_v = torch.matmul(layer10_attn_in, self.layer10_attention_to_v_weight.t())
+                >>>layer10_v.shape=torch.Size([1, 4192, 3840]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q.view(1, unified_state.shape[1], self.n_heads, self.head_dim)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_v.shape=torch.Size([1, 4192, 30, 128]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q * torch.rsqrt(layer10_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_q_weight.view(1, 1, 1, -1)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k * torch.rsqrt(layer10_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_k_weight.view(1, 1, 1, -1)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_cos.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_cos.dtype=torch.bfloat16
+layer10_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_sin.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_sin.dtype=torch.bfloat16
+layer10_q_even = layer10_q[..., 0::2]
+                >>>layer10_q_even.shape=torch.Size([1, 4192, 30, 64]), layer10_q_even.dtype=torch.bfloat16
+layer10_q_odd = layer10_q[..., 1::2]
+                >>>layer10_q_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_q_odd.dtype=torch.bfloat16
+layer10_q = torch.stack([layer10_q_even * layer10_freqs_cos - layer10_q_odd * layer10_freqs_sin, layer10_q_even * layer10_freqs_sin + layer10_q_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k_even = layer10_k[..., 0::2]
+                >>>layer10_k_even.shape=torch.Size([1, 4192, 30, 64]), layer10_k_even.dtype=torch.bfloat16
+layer10_k_odd = layer10_k[..., 1::2]
+                >>>layer10_k_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_k_odd.dtype=torch.bfloat16
+layer10_k = torch.stack([layer10_k_even * layer10_freqs_cos - layer10_k_odd * layer10_freqs_sin, layer10_k_even * layer10_freqs_sin + layer10_k_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_q = layer10_q.transpose(1, 2)
+                >>>layer10_q.shape=torch.Size([1, 30, 4192, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.transpose(1, 2)
+                >>>layer10_k.shape=torch.Size([1, 30, 4192, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.transpose(1, 2)
+                >>>layer10_v.shape=torch.Size([1, 30, 4192, 128]), layer10_v.dtype=torch.bfloat16
+layer10_scores = torch.matmul(layer10_q.float(), layer10_k.float().transpose(-2, -1)) * self.attention_scale
+                >>>layer10_scores.shape=torch.Size([1, 30, 4192, 4192]), layer10_scores.dtype=torch.float32
+layer10_probs = torch.softmax(layer10_scores, dim=-1).to(layer10_v.dtype)
+                >>>layer10_probs.shape=torch.Size([1, 30, 4192, 4192]), layer10_probs.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_probs, layer10_v)
+                >>>layer10_attn.shape=torch.Size([1, 30, 4192, 128]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_msa * layer10_attn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm1_weight
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_in = layer10_ffn_in * layer10_scale_mlp
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_a = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w1_weight.t())
+                >>>layer10_ffn_a.shape=torch.Size([1, 4192, 10240]), layer10_ffn_a.dtype=torch.bfloat16
+layer10_ffn_b = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w3_weight.t())
+                >>>layer10_ffn_b.shape=torch.Size([1, 4192, 10240]), layer10_ffn_b.dtype=torch.bfloat16
+layer10_ffn = F.silu(layer10_ffn_a) * layer10_ffn
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 10240]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = torch.matmul(layer10_ffn, self.layer10_feed_forward_w2_weight.t())
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = layer10_ffn * torch.rsqrt(layer10_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm2_weight
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_mlp * layer10_ffn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer6_attn.shape: torch.Size([1, 30, 4192, 128])
+
+
+Analyzing layer10
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_mod = torch.matmul(adaln_input, self.layer10_adaln_weight.t()) + self.layer10_adaln_bias
+                >>>layer10_mod.shape=torch.Size([1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_mod = layer10_mod.unsqueeze(1)
+                >>>layer10_mod.shape=torch.Size([1, 1, 15360]), layer10_mod.dtype=torch.bfloat16
+layer10_scale_msa, layer10_gate_msa, layer10_scale_mlp, layer10_gate_mlp = layer10_mod.chunk(4, dim=2)
+layer10_gate_msa = torch.tanh(layer10_gate_msa)
+                >>>layer10_gate_msa.shape=torch.Size([1, 1, 3840]), layer10_gate_msa.dtype=torch.bfloat16
+layer10_gate_mlp = torch.tanh(layer10_gate_mlp)
+                >>>layer10_gate_mlp.shape=torch.Size([1, 1, 3840]), layer10_gate_mlp.dtype=torch.bfloat16
+layer10_scale_msa = 1.0 + layer10_scale_msa
+                >>>layer10_scale_msa.shape=torch.Size([1, 1, 3840]), layer10_scale_msa.dtype=torch.bfloat16
+layer10_scale_mlp = 1.0 + layer10_scale_mlp
+                >>>layer10_scale_mlp.shape=torch.Size([1, 1, 3840]), layer10_scale_mlp.dtype=torch.bfloat16
+layer10_attn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm1_weight
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_attn_in = layer10_attn_in * layer10_scale_msa
+                >>>layer10_attn_in.shape=torch.Size([1, 4192, 3840]), layer10_attn_in.dtype=torch.bfloat16
+layer10_q = torch.matmul(layer10_attn_in, self.layer10_attention_to_q_weight.t())
+                >>>layer10_q.shape=torch.Size([1, 4192, 3840]), layer10_q.dtype=torch.bfloat16
+layer10_k = torch.matmul(layer10_attn_in, self.layer10_attention_to_k_weight.t())
+                >>>layer10_k.shape=torch.Size([1, 4192, 3840]), layer10_k.dtype=torch.bfloat16
+layer10_v = torch.matmul(layer10_attn_in, self.layer10_attention_to_v_weight.t())
+                >>>layer10_v.shape=torch.Size([1, 4192, 3840]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q.view(1, unified_state.shape[1], self.n_heads, self.head_dim)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
+                >>>layer10_v.shape=torch.Size([1, 4192, 30, 128]), layer10_v.dtype=torch.bfloat16
+layer10_q = layer10_q * torch.rsqrt(layer10_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_q_weight.view(1, 1, 1, -1)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k * torch.rsqrt(layer10_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_k_weight.view(1, 1, 1, -1)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_cos.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_cos.dtype=torch.bfloat16
+layer10_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer10_attn_in.dtype)
+                >>>layer10_freqs_sin.shape=torch.Size([1, 4192, 1, 64]), layer10_freqs_sin.dtype=torch.bfloat16
+layer10_q_even = layer10_q[..., 0::2]
+                >>>layer10_q_even.shape=torch.Size([1, 4192, 30, 64]), layer10_q_even.dtype=torch.bfloat16
+layer10_q_odd = layer10_q[..., 1::2]
+                >>>layer10_q_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_q_odd.dtype=torch.bfloat16
+layer10_q = torch.stack([layer10_q_even * layer10_freqs_cos - layer10_q_odd * layer10_freqs_sin, layer10_q_even * layer10_freqs_sin + layer10_q_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_q.shape=torch.Size([1, 4192, 30, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k_even = layer10_k[..., 0::2]
+                >>>layer10_k_even.shape=torch.Size([1, 4192, 30, 64]), layer10_k_even.dtype=torch.bfloat16
+layer10_k_odd = layer10_k[..., 1::2]
+                >>>layer10_k_odd.shape=torch.Size([1, 4192, 30, 64]), layer10_k_odd.dtype=torch.bfloat16
+layer10_k = torch.stack([layer10_k_even * layer10_freqs_cos - layer10_k_odd * layer10_freqs_sin, layer10_k_even * layer10_freqs_sin + layer10_k_odd * layer10_freqs_cos], dim=-1).flatten(3)
+                >>>layer10_k.shape=torch.Size([1, 4192, 30, 128]), layer10_k.dtype=torch.bfloat16
+layer10_q = layer10_q.transpose(1, 2)
+                >>>layer10_q.shape=torch.Size([1, 30, 4192, 128]), layer10_q.dtype=torch.bfloat16
+layer10_k = layer10_k.transpose(1, 2)
+                >>>layer10_k.shape=torch.Size([1, 30, 4192, 128]), layer10_k.dtype=torch.bfloat16
+layer10_v = layer10_v.transpose(1, 2)
+                >>>layer10_v.shape=torch.Size([1, 30, 4192, 128]), layer10_v.dtype=torch.bfloat16
+layer10_scores = torch.matmul(layer10_q.float(), layer10_k.float().transpose(-2, -1)) * self.attention_scale
+                >>>layer10_scores.shape=torch.Size([1, 30, 4192, 4192]), layer10_scores.dtype=torch.float32
+layer10_probs = torch.softmax(layer10_scores, dim=-1).to(layer10_v.dtype)
+                >>>layer10_probs.shape=torch.Size([1, 30, 4192, 4192]), layer10_probs.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_probs, layer10_v)
+                >>>layer10_attn.shape=torch.Size([1, 30, 4192, 128]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+                >>>layer10_attn.shape=torch.Size([1, 4192, 3840]), layer10_attn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_msa * layer10_attn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+layer10_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm1_weight
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_in = layer10_ffn_in * layer10_scale_mlp
+                >>>layer10_ffn_in.shape=torch.Size([1, 4192, 3840]), layer10_ffn_in.dtype=torch.bfloat16
+layer10_ffn_a = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w1_weight.t())
+                >>>layer10_ffn_a.shape=torch.Size([1, 4192, 10240]), layer10_ffn_a.dtype=torch.bfloat16
+layer10_ffn_b = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w3_weight.t())
+                >>>layer10_ffn_b.shape=torch.Size([1, 4192, 10240]), layer10_ffn_b.dtype=torch.bfloat16
+layer10_ffn = F.silu(layer10_ffn_a) * layer10_ffn
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 10240]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = torch.matmul(layer10_ffn, self.layer10_feed_forward_w2_weight.t())
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+layer10_ffn = layer10_ffn * torch.rsqrt(layer10_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm2_weight
+                >>>layer10_ffn.shape=torch.Size([1, 4192, 3840]), layer10_ffn.dtype=torch.bfloat16
+unified_state = unified_state + layer10_gate_mlp * layer10_ffn
+                >>>unified_state.shape=torch.Size([1, 4192, 3840]), unified_state.dtype=torch.bfloat16
+                >>>saved output.png in 11.17s on cuda with torch.bfloat16
+(base) ubuntu@computeinstance-u00gg631ww32przn3x:/mnt/shared/workspace/alobashev/mobileI2V/z-image-on-device/Z-Image-minimal$ 
+
+
+
+
+# --------------------------------------------
+# FP16-only online softmax attention (no fp32)
+# --------------------------------------------
+# Expected shapes BEFORE transpose:
+#   layer10_q, layer10_k, layer10_v: [B, H, N, D] or [B, N, H, D] depending on your code.
+# Your snippet does transpose(1,2) to get: [B, H, N, D]
+layer10_q = layer10_q.transpose(1, 2)   # [B, H, N, D]
+layer10_k = layer10_k.transpose(1, 2)   # [B, H, N, D]
+layer10_v = layer10_v.transpose(1, 2)   # [B, H, N, Dv] (Dv=128 in your case)
+
+# Force FP16 compute (change to torch.bfloat16 if your chip supports BF16 better than FP16)
+compute_dtype = torch.bfloat16
+q = layer10_q.to(compute_dtype)
+k = layer10_k.to(compute_dtype)
+v = layer10_v.to(compute_dtype)
+
+B, H, N, D = q.shape
+Dv = v.shape[-1]
+
+# scale in compute dtype (avoid fp32 constant propagation)
+scale = torch.tensor(self.attention_scale, device=q.device, dtype=compute_dtype)
+
+# Running state per (B,H,query_index)
+m  = torch.full((B, H, N, 1), torch.finfo(compute_dtype).min, device=q.device, dtype=compute_dtype)
+l  = torch.zeros((B, H, N, 1), device=q.device, dtype=compute_dtype)
+lc = torch.zeros_like(l)  # compensation for l (Kahan-like, per block)
+
+o  = torch.zeros((B, H, N, Dv), device=q.device, dtype=compute_dtype)
+oc = torch.zeros_like(o)  # compensation for o (Kahan-like, per block)
+
+# Stream over keys/values in blocks to avoid materializing [N,N]
+BLOCK_K = 128  # tune for your chip (64/128/256)
+
+for start in range(0, N, BLOCK_K):
+    end = min(start + BLOCK_K, N)
+
+    k_b = k[:, :, start:end, :]                 # [B,H,Bk,D]
+    v_b = v[:, :, start:end, :]                 # [B,H,Bk,Dv]
+
+    # logits for this block: s = (q @ k_b^T) * scale
+    # s: [B,H,N,Bk]
+    s = torch.matmul(q, k_b.transpose(-2, -1)) * scale
+
+    # block max, then new running max
+    mb = s.max(dim=-1, keepdim=True).values     # [B,H,N,1]
+    m_new = torch.maximum(m, mb)                # [B,H,N,1]
+
+    # rescale old accumulators by r = exp(m - m_new) in (0,1]
+    r = torch.exp(m - m_new)                    # [B,H,N,1]
+
+    l  = l  * r
+    lc = lc * r
+    o  = o  * r
+    oc = oc * r
+
+    # u = exp(s - m_new) is safe (<= 1)
+    u = torch.exp(s - m_new)                    # [B,H,N,Bk]
+
+    # sum_u = sum(u) (keep dtype)
+    sum_u = u.sum(dim=-1, keepdim=True, dtype=compute_dtype)  # [B,H,N,1]
+
+    # Kahan-like update for l (per block)
+    y  = sum_u - lc
+    t  = l + y
+    lc = (t - l) - y
+    l  = t
+
+    # block contribution to output: u @ v_b
+    # [B,H,N,Bk] @ [B,H,Bk,Dv] -> [B,H,N,Dv]
+    block_out = torch.matmul(u, v_b)
+
+    # Kahan-like update for o (per block, vector-valued)
+    y2 = block_out - oc
+    t2 = o + y2
+    oc = (t2 - o) - y2
+    o  = t2
+
+    m = m_new
+
+# Combine compensated sums
+l_total = l + lc            # [B,H,N,1]
+o_total = o + oc            # [B,H,N,Dv]
+
+# -------------------------------
+# Reciprocal via Newton (unrolled)
+# -------------------------------
+inv_l = torch.reciprocal(l_total)               # initial guess in FP16
+two   = torch.tensor(2.0, device=q.device, dtype=compute_dtype)
+
+inv_l = inv_l * (two - l_total * inv_l)         # Newton step 1
+inv_l = inv_l * (two - l_total * inv_l)         # Newton step 2
+inv_l = inv_l * (two - l_total * inv_l)         # Newton step 3 (optional but helps)
+
+# Final attention: o / l
+layer10_attn = o_total * inv_l                  # [B,H,N,Dv]
+
+# Cast back to original dtype if you want (e.g., bf16)
+layer10_attn = layer10_attn.to(layer10_v.dtype)
+
+
+
+
+
+# --------------------------------------------
+# FP16-only online softmax attention (no fp32)
+# --------------------------------------------
+# Expected shapes BEFORE transpose:
+#   layer10_q, layer10_k, layer10_v: [B, H, N, D] or [B, N, H, D] depending on your code.
+# Your snippet does transpose(1,2) to get: [B, H, N, D]
+layer10_q = layer10_q.transpose(1, 2)   # [B, H, N, D]
+layer10_k = layer10_k.transpose(1, 2)   # [B, H, N, D]
+layer10_v = layer10_v.transpose(1, 2)   # [B, H, N, Dv] (Dv=128 in your case)
+
+# Force FP16 compute (change to torch.bfloat16 if your chip supports BF16 better than FP16)
+q = layer10_q
+k = layer10_k
+v = layer10_v
+
+B, H, N, D = q.shape
+Dv = v.shape[-1]
+
+# scale in compute dtype (avoid fp32 constant propagation)
+scale = torch.tensor(self.attention_scale, device=q.device, dtype=q.dtype)
+
+# Running state per (B,H,query_index)
+m  = torch.full((B, H, N, 1), torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype)
+l  = torch.zeros((B, H, N, 1), device=q.device, dtype=q.dtype)
+lc = torch.zeros_like(l)  # compensation for l (Kahan-like, per block)
+
+o  = torch.zeros((B, H, N, Dv), device=q.device, dtype=q.dtype)
+oc = torch.zeros_like(o)  # compensation for o (Kahan-like, per block)
+
+# Stream over keys/values in blocks to avoid materializing [N,N]
+BLOCK_K = 128  # tune for your chip (64/128/256)
+
+for start in range(0, N, BLOCK_K):
+    end = min(start + BLOCK_K, N)
+
+    k_b = k[:, :, start:end, :]                 # [B,H,Bk,D]
+    v_b = v[:, :, start:end, :]                 # [B,H,Bk,Dv]
+
+    # logits for this block: s = (q @ k_b^T) * scale
+    # s: [B,H,N,Bk]
+    s = torch.matmul(q, k_b.transpose(-2, -1)) * scale
+
+    # block max, then new running max
+    mb = s.max(dim=-1, keepdim=True).values     # [B,H,N,1]
+    m_new = torch.maximum(m, mb)                # [B,H,N,1]
+
+    # rescale old accumulators by r = exp(m - m_new) in (0,1]
+    r = torch.exp(m - m_new)                    # [B,H,N,1]
+
+    l  = l  * r
+    lc = lc * r
+    o  = o  * r
+    oc = oc * r
+
+    # u = exp(s - m_new) is safe (<= 1)
+    u = torch.exp(s - m_new)                    # [B,H,N,Bk]
+
+    # sum_u = sum(u) (keep dtype)
+    sum_u = u.sum(dim=-1, keepdim=True, dtype=q.dtype)  # [B,H,N,1]
+
+    # Kahan-like update for l (per block)
+    y  = sum_u - lc
+    t  = l + y
+    lc = (t - l) - y
+    l  = t
+
+    # block contribution to output: u @ v_b
+    # [B,H,N,Bk] @ [B,H,Bk,Dv] -> [B,H,N,Dv]
+    block_out = torch.matmul(u, v_b)
+
+    # Kahan-like update for o (per block, vector-valued)
+    y2 = block_out - oc
+    t2 = o + y2
+    oc = (t2 - o) - y2
+    o  = t2
+
+    m = m_new
+
+# Combine compensated sums
+l_total = l + lc            # [B,H,N,1]
+o_total = o + oc            # [B,H,N,Dv]
+
+# -------------------------------
+# Reciprocal via Newton (unrolled)
+# -------------------------------
+inv_l = torch.reciprocal(l_total)               # initial guess in FP16
+two   = torch.tensor(2.0, device=q.device, dtype=q.dtype)
+
+inv_l = inv_l * (two - l_total * inv_l)         # Newton step 1
+inv_l = inv_l * (two - l_total * inv_l)         # Newton step 2
+inv_l = inv_l * (two - l_total * inv_l)         # Newton step 3 (optional but helps)
+
+# Final attention: o / l
+layer10_attn = o_total * inv_l                  # [B,H,N,Dv]

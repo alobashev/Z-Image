@@ -1,12 +1,10 @@
-"""Z-Image Native Implementation."""
+"""Minimal Z-Image model package."""
 
-from .utils import load_from_local_dir
-from .zimage import ZImageTransformer2DModel, generate
+from .zimage import AutoencoderKL, ZImageTransformer2DModel
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "AutoencoderKL",
     "ZImageTransformer2DModel",
-    "generate",
-    "load_from_local_dir",
 ]

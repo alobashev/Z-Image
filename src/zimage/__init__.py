@@ -1,9 +1,9 @@
-"""Z-Image PyTorch Native Implementation."""
+"""Minimal Z-Image model definitions."""
 
-from .pipeline import generate
+from .autoencoder import AutoencoderKL
 from .transformer import ZImageTransformer2DModel
 
 __all__ = [
+    "AutoencoderKL",
     "ZImageTransformer2DModel",
-    "generate",
 ]
