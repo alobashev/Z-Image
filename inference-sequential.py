@@ -832,6 +832,9 @@ class ZImageTransformer2DModel(nn.Module):
         nr0_attn = nr0_attn.transpose(1, 2).reshape(1, x_state.shape[1], self.q_proj_dim)
         if self.debug_nan:
             debug_check_finite("nr0_attn_merge", nr0_attn)
+        nr0_attn = nr0_attn / 1000.0
+        if self.debug_nan:
+            debug_check_finite("nr0_attn_pre_out_proj_scaled", nr0_attn)
         nr0_attn = torch.matmul(nr0_attn, self.nr0_attention_to_out_weight.t())
         if self.debug_nan:
             debug_check_finite("nr0_attn_out_proj", nr0_attn)
@@ -841,6 +844,10 @@ class ZImageTransformer2DModel(nn.Module):
         nr0_attn = nr0_attn * nr0_attn_norm
         if self.debug_nan:
             debug_check_finite("nr0_attn_post_norm", nr0_attn)
+        nr0_attn = nr0_attn * 1000.0
+        if self.debug_nan:
+            debug_check_finite("nr0_attn_post_norm_compensated", nr0_attn)
+        if self.debug_nan:
             debug_check_finite("nr0_attention_norm2_weight", self.nr0_attention_norm2_weight)
         nr0_attn = nr0_attn * self.nr0_attention_norm2_weight
         if self.debug_nan:
