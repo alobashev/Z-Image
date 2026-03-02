@@ -40,6 +40,25 @@ BASE_SHIFT = 0.5
 MAX_SHIFT = 1.15
 
 
+def debug_check_finite(name: str, tensor: torch.Tensor) -> None:
+    finite_mask = torch.isfinite(tensor)
+    if bool(finite_mask.all()):
+        return
+    nan_count = int(torch.isnan(tensor).sum().item())
+    inf_count = int(torch.isinf(tensor).sum().item())
+    finite_values = tensor[finite_mask]
+    if finite_values.numel() > 0:
+        finite_min = float(finite_values.min().item())
+        finite_max = float(finite_values.max().item())
+        stats = f" finite_min={finite_min} finite_max={finite_max}"
+    else:
+        stats = ""
+    raise RuntimeError(
+        f"non-finite tensor at {name}: shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+        f"nan={nan_count} inf={inf_count}{stats}"
+    )
+
+
 class ZImageTransformer2DModel(nn.Module):
     """Single-class transformer with an unrolled forward pass."""
 
@@ -95,6 +114,7 @@ class ZImageTransformer2DModel(nn.Module):
         self.axes_lens = list(axes_lens)
         self.rope_theta = rope_theta
         self.attention_scale = 1.0 / math.sqrt(self.head_dim)
+        self.debug_nan = False
 
         self.x_embedder_weight = nn.Parameter(torch.empty((self.dim, self.patch_dim), device=device, dtype=dtype))
         self.x_embedder_bias = nn.Parameter(torch.empty((self.dim,), device=device, dtype=dtype))
@@ -618,15 +638,21 @@ class ZImageTransformer2DModel(nn.Module):
         self.layer29_adaln_weight = nn.Parameter(torch.empty((4 * self.dim, self.adaln_dim), device=device, dtype=dtype))
         self.layer29_adaln_bias = nn.Parameter(torch.empty((4 * self.dim,), device=device, dtype=dtype))
 
-        rope_freqs = []
+        rope_freqs_cos = []
+        rope_freqs_sin = []
+        rope_dtype = torch.float16 if dtype is None else dtype
         for axis_dim, axis_len in zip(self.axes_dims, self.axes_lens):
-            freqs = 1.0 / (self.rope_theta ** (torch.arange(0, axis_dim, 2, dtype=torch.float64, device=device) / axis_dim))
-            timestep = torch.arange(axis_len, dtype=torch.float64, device=device)
-            freqs = torch.outer(timestep, freqs).float()
-            rope_freqs.append(torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64))
-        self.register_buffer("rope_freqs_0", rope_freqs[0], persistent=False)
-        self.register_buffer("rope_freqs_1", rope_freqs[1], persistent=False)
-        self.register_buffer("rope_freqs_2", rope_freqs[2], persistent=False)
+            freqs = 1.0 / (self.rope_theta ** (torch.arange(0, axis_dim, 2, dtype=rope_dtype, device=device) / axis_dim))
+            timestep = torch.arange(axis_len, dtype=rope_dtype, device=device)
+            freqs = torch.outer(timestep, freqs)
+            rope_freqs_cos.append(torch.cos(freqs))
+            rope_freqs_sin.append(torch.sin(freqs))
+        self.register_buffer("rope_freqs_cos_0", rope_freqs_cos[0], persistent=False)
+        self.register_buffer("rope_freqs_cos_1", rope_freqs_cos[1], persistent=False)
+        self.register_buffer("rope_freqs_cos_2", rope_freqs_cos[2], persistent=False)
+        self.register_buffer("rope_freqs_sin_0", rope_freqs_sin[0], persistent=False)
+        self.register_buffer("rope_freqs_sin_1", rope_freqs_sin[1], persistent=False)
+        self.register_buffer("rope_freqs_sin_2", rope_freqs_sin[2], persistent=False)
 
     def forward(self, x, t, cap_feats, patch_size=2, f_patch_size=1):
         if len(x) != 1 or len(cap_feats) != 1:
@@ -646,17 +672,20 @@ class ZImageTransformer2DModel(nn.Module):
         t_half = self.frequency_embedding_size // 2
         t_freqs = torch.exp(
             -math.log(MAX_PERIOD)
-            * torch.arange(start=0, end=t_half, dtype=torch.float32, device=t_scaled.device)
+            * torch.arange(start=0, end=t_half, dtype=self.t_mlp_w1.dtype, device=t_scaled.device)
             / t_half
         )
-        t_args = t_scaled[:, None].float() * t_freqs[None]
+        t_args = t_scaled[:, None] * t_freqs[None]
         t_emb = torch.cat([torch.cos(t_args), torch.sin(t_args)], dim=-1)
+        if self.debug_nan:
+            debug_check_finite("t_emb", t_emb)
         if self.frequency_embedding_size % 2:
             t_emb = torch.cat([t_emb, torch.zeros_like(t_emb[:, :1])], dim=-1)
-        t_emb = t_emb.to(self.t_mlp_w1.dtype)
         t_hidden = torch.matmul(t_emb, self.t_mlp_w1.t()) + self.t_mlp_b1
         t_hidden = F.silu(t_hidden)
         adaln_input = torch.matmul(t_hidden, self.t_mlp_w2.t()) + self.t_mlp_b2
+        if self.debug_nan:
+            debug_check_finite("adaln_input", adaln_input)
 
         # patchify latent image tokens
         channels, frames, height, width = x0.shape
@@ -690,11 +719,19 @@ class ZImageTransformer2DModel(nn.Module):
         cap_positions = torch.arange(1, cap_tokens.shape[0] + 1, dtype=torch.long, device=device)
         cap_zero = torch.zeros_like(cap_positions)
         cap_pos_ids = torch.stack([cap_positions, cap_zero, cap_zero], dim=-1)
-        cap_freqs = torch.cat(
+        cap_freqs_cos = torch.cat(
             [
-                self.rope_freqs_0[cap_pos_ids[:, 0]],
-                self.rope_freqs_1[cap_pos_ids[:, 1]],
-                self.rope_freqs_2[cap_pos_ids[:, 2]],
+                self.rope_freqs_cos_0[cap_pos_ids[:, 0]],
+                self.rope_freqs_cos_1[cap_pos_ids[:, 1]],
+                self.rope_freqs_cos_2[cap_pos_ids[:, 2]],
+            ],
+            dim=-1,
+        ).unsqueeze(0)
+        cap_freqs_sin = torch.cat(
+            [
+                self.rope_freqs_sin_0[cap_pos_ids[:, 0]],
+                self.rope_freqs_sin_1[cap_pos_ids[:, 1]],
+                self.rope_freqs_sin_2[cap_pos_ids[:, 2]],
             ],
             dim=-1,
         ).unsqueeze(0)
@@ -714,11 +751,19 @@ class ZImageTransformer2DModel(nn.Module):
         ).reshape(-1, 3)
         if image_pad > 0:
             image_pos_ids = torch.cat([image_pos_ids, torch.zeros((image_pad, 3), dtype=torch.long, device=device)], dim=0)
-        x_freqs = torch.cat(
+        x_freqs_cos = torch.cat(
             [
-                self.rope_freqs_0[image_pos_ids[:, 0]],
-                self.rope_freqs_1[image_pos_ids[:, 1]],
-                self.rope_freqs_2[image_pos_ids[:, 2]],
+                self.rope_freqs_cos_0[image_pos_ids[:, 0]],
+                self.rope_freqs_cos_1[image_pos_ids[:, 1]],
+                self.rope_freqs_cos_2[image_pos_ids[:, 2]],
+            ],
+            dim=-1,
+        ).unsqueeze(0)
+        x_freqs_sin = torch.cat(
+            [
+                self.rope_freqs_sin_0[image_pos_ids[:, 0]],
+                self.rope_freqs_sin_1[image_pos_ids[:, 1]],
+                self.rope_freqs_sin_2[image_pos_ids[:, 2]],
             ],
             dim=-1,
         ).unsqueeze(0)
@@ -728,16 +773,22 @@ class ZImageTransformer2DModel(nn.Module):
         if image_pad > 0:
             x_state[image_original_len:] = self.x_pad_token
         x_state = x_state.unsqueeze(0)
+        if self.debug_nan:
+            debug_check_finite("x_state", x_state)
 
         cap_norm = cap_tokens * torch.rsqrt(cap_tokens.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cap_norm_weight
         cap_state = torch.matmul(cap_norm, self.cap_linear_weight.t()) + self.cap_linear_bias
         if cap_pad > 0:
             cap_state[cap_original_len:] = self.cap_pad_token
         cap_state = cap_state.unsqueeze(0)
+        if self.debug_nan:
+            debug_check_finite("cap_state", cap_state)
 
         # noise refiner
         # nr0
         nr0_mod = torch.matmul(adaln_input, self.nr0_adaln_weight.t()) + self.nr0_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("nr0_mod", nr0_mod)
         nr0_mod = nr0_mod.unsqueeze(1)
         nr0_scale_msa, nr0_gate_msa, nr0_scale_mlp, nr0_gate_mlp = nr0_mod.chunk(4, dim=2)
         nr0_gate_msa = torch.tanh(nr0_gate_msa)
@@ -754,24 +805,49 @@ class ZImageTransformer2DModel(nn.Module):
         nr0_v = nr0_v.view(1, x_state.shape[1], self.n_kv_heads, self.head_dim)
         nr0_q = nr0_q * torch.rsqrt(nr0_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr0_norm_q_weight.view(1, 1, 1, -1)
         nr0_k = nr0_k * torch.rsqrt(nr0_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr0_norm_k_weight.view(1, 1, 1, -1)
-        nr0_freqs_cos = x_freqs.real.unsqueeze(2).to(nr0_attn_in.dtype)
-        nr0_freqs_sin = x_freqs.imag.unsqueeze(2).to(nr0_attn_in.dtype)
+        nr0_freqs_cos = x_freqs_cos.unsqueeze(2)
+        nr0_freqs_sin = x_freqs_sin.unsqueeze(2)
         nr0_q_even = nr0_q[..., 0::2]
         nr0_q_odd = nr0_q[..., 1::2]
         nr0_q = torch.stack([nr0_q_even * nr0_freqs_cos - nr0_q_odd * nr0_freqs_sin, nr0_q_even * nr0_freqs_sin + nr0_q_odd * nr0_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("nr0_q", nr0_q)
         nr0_k_even = nr0_k[..., 0::2]
         nr0_k_odd = nr0_k[..., 1::2]
         nr0_k = torch.stack([nr0_k_even * nr0_freqs_cos - nr0_k_odd * nr0_freqs_sin, nr0_k_even * nr0_freqs_sin + nr0_k_odd * nr0_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("nr0_k", nr0_k)
         nr0_q = nr0_q.transpose(1, 2)
         nr0_k = nr0_k.transpose(1, 2)
         nr0_v = nr0_v.transpose(1, 2)
-        nr0_scores = torch.matmul(nr0_q.float(), nr0_k.float().transpose(-2, -1)) * self.attention_scale
-        nr0_probs = torch.softmax(nr0_scores, dim=-1).to(nr0_v.dtype)
+        nr0_scores = torch.matmul(nr0_q, nr0_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("nr0_scores", nr0_scores)
+        nr0_probs = torch.softmax(nr0_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("nr0_probs", nr0_probs)
         nr0_attn = torch.matmul(nr0_probs, nr0_v)
+        if self.debug_nan:
+            debug_check_finite("nr0_attn_heads", nr0_attn)
         nr0_attn = nr0_attn.transpose(1, 2).reshape(1, x_state.shape[1], self.q_proj_dim)
+        if self.debug_nan:
+            debug_check_finite("nr0_attn_merge", nr0_attn)
         nr0_attn = torch.matmul(nr0_attn, self.nr0_attention_to_out_weight.t())
-        nr0_attn = nr0_attn * torch.rsqrt(nr0_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr0_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("nr0_attn_out_proj", nr0_attn)
+        nr0_attn_norm = torch.rsqrt(nr0_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps)
+        if self.debug_nan:
+            debug_check_finite("nr0_attn_norm", nr0_attn_norm)
+        nr0_attn = nr0_attn * nr0_attn_norm
+        if self.debug_nan:
+            debug_check_finite("nr0_attn_post_norm", nr0_attn)
+            debug_check_finite("nr0_attention_norm2_weight", self.nr0_attention_norm2_weight)
+        nr0_attn = nr0_attn * self.nr0_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("nr0_attn", nr0_attn)
         x_state = x_state + nr0_gate_msa * nr0_attn
+        if self.debug_nan:
+            debug_check_finite("nr0_state_after_attn", x_state)
         nr0_ffn_in = x_state * torch.rsqrt(x_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr0_ffn_norm1_weight
         nr0_ffn_in = nr0_ffn_in * nr0_scale_mlp
         nr0_ffn_a = torch.matmul(nr0_ffn_in, self.nr0_feed_forward_w1_weight.t())
@@ -779,10 +855,16 @@ class ZImageTransformer2DModel(nn.Module):
         nr0_ffn = F.silu(nr0_ffn_a) * nr0_ffn_b
         nr0_ffn = torch.matmul(nr0_ffn, self.nr0_feed_forward_w2_weight.t())
         nr0_ffn = nr0_ffn * torch.rsqrt(nr0_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr0_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("nr0_ffn", nr0_ffn)
         x_state = x_state + nr0_gate_mlp * nr0_ffn
+        if self.debug_nan:
+            debug_check_finite("nr0_state_after_ffn", x_state)
 
         # nr1
         nr1_mod = torch.matmul(adaln_input, self.nr1_adaln_weight.t()) + self.nr1_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("nr1_mod", nr1_mod)
         nr1_mod = nr1_mod.unsqueeze(1)
         nr1_scale_msa, nr1_gate_msa, nr1_scale_mlp, nr1_gate_mlp = nr1_mod.chunk(4, dim=2)
         nr1_gate_msa = torch.tanh(nr1_gate_msa)
@@ -799,24 +881,36 @@ class ZImageTransformer2DModel(nn.Module):
         nr1_v = nr1_v.view(1, x_state.shape[1], self.n_kv_heads, self.head_dim)
         nr1_q = nr1_q * torch.rsqrt(nr1_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr1_norm_q_weight.view(1, 1, 1, -1)
         nr1_k = nr1_k * torch.rsqrt(nr1_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr1_norm_k_weight.view(1, 1, 1, -1)
-        nr1_freqs_cos = x_freqs.real.unsqueeze(2).to(nr1_attn_in.dtype)
-        nr1_freqs_sin = x_freqs.imag.unsqueeze(2).to(nr1_attn_in.dtype)
+        nr1_freqs_cos = x_freqs_cos.unsqueeze(2)
+        nr1_freqs_sin = x_freqs_sin.unsqueeze(2)
         nr1_q_even = nr1_q[..., 0::2]
         nr1_q_odd = nr1_q[..., 1::2]
         nr1_q = torch.stack([nr1_q_even * nr1_freqs_cos - nr1_q_odd * nr1_freqs_sin, nr1_q_even * nr1_freqs_sin + nr1_q_odd * nr1_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("nr1_q", nr1_q)
         nr1_k_even = nr1_k[..., 0::2]
         nr1_k_odd = nr1_k[..., 1::2]
         nr1_k = torch.stack([nr1_k_even * nr1_freqs_cos - nr1_k_odd * nr1_freqs_sin, nr1_k_even * nr1_freqs_sin + nr1_k_odd * nr1_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("nr1_k", nr1_k)
         nr1_q = nr1_q.transpose(1, 2)
         nr1_k = nr1_k.transpose(1, 2)
         nr1_v = nr1_v.transpose(1, 2)
-        nr1_scores = torch.matmul(nr1_q.float(), nr1_k.float().transpose(-2, -1)) * self.attention_scale
-        nr1_probs = torch.softmax(nr1_scores, dim=-1).to(nr1_v.dtype)
+        nr1_scores = torch.matmul(nr1_q, nr1_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("nr1_scores", nr1_scores)
+        nr1_probs = torch.softmax(nr1_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("nr1_probs", nr1_probs)
         nr1_attn = torch.matmul(nr1_probs, nr1_v)
         nr1_attn = nr1_attn.transpose(1, 2).reshape(1, x_state.shape[1], self.q_proj_dim)
         nr1_attn = torch.matmul(nr1_attn, self.nr1_attention_to_out_weight.t())
         nr1_attn = nr1_attn * torch.rsqrt(nr1_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr1_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("nr1_attn", nr1_attn)
         x_state = x_state + nr1_gate_msa * nr1_attn
+        if self.debug_nan:
+            debug_check_finite("nr1_state_after_attn", x_state)
         nr1_ffn_in = x_state * torch.rsqrt(x_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr1_ffn_norm1_weight
         nr1_ffn_in = nr1_ffn_in * nr1_scale_mlp
         nr1_ffn_a = torch.matmul(nr1_ffn_in, self.nr1_feed_forward_w1_weight.t())
@@ -824,7 +918,11 @@ class ZImageTransformer2DModel(nn.Module):
         nr1_ffn = F.silu(nr1_ffn_a) * nr1_ffn_b
         nr1_ffn = torch.matmul(nr1_ffn, self.nr1_feed_forward_w2_weight.t())
         nr1_ffn = nr1_ffn * torch.rsqrt(nr1_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.nr1_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("nr1_ffn", nr1_ffn)
         x_state = x_state + nr1_gate_mlp * nr1_ffn
+        if self.debug_nan:
+            debug_check_finite("nr1_state_after_ffn", x_state)
 
         # context refiner
         # cr0
@@ -837,31 +935,47 @@ class ZImageTransformer2DModel(nn.Module):
         cr0_v = cr0_v.view(1, cap_state.shape[1], self.n_kv_heads, self.head_dim)
         cr0_q = cr0_q * torch.rsqrt(cr0_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr0_norm_q_weight.view(1, 1, 1, -1)
         cr0_k = cr0_k * torch.rsqrt(cr0_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr0_norm_k_weight.view(1, 1, 1, -1)
-        cr0_freqs_cos = cap_freqs.real.unsqueeze(2).to(cr0_attn_in.dtype)
-        cr0_freqs_sin = cap_freqs.imag.unsqueeze(2).to(cr0_attn_in.dtype)
+        cr0_freqs_cos = cap_freqs_cos.unsqueeze(2)
+        cr0_freqs_sin = cap_freqs_sin.unsqueeze(2)
         cr0_q_even = cr0_q[..., 0::2]
         cr0_q_odd = cr0_q[..., 1::2]
         cr0_q = torch.stack([cr0_q_even * cr0_freqs_cos - cr0_q_odd * cr0_freqs_sin, cr0_q_even * cr0_freqs_sin + cr0_q_odd * cr0_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("cr0_q", cr0_q)
         cr0_k_even = cr0_k[..., 0::2]
         cr0_k_odd = cr0_k[..., 1::2]
         cr0_k = torch.stack([cr0_k_even * cr0_freqs_cos - cr0_k_odd * cr0_freqs_sin, cr0_k_even * cr0_freqs_sin + cr0_k_odd * cr0_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("cr0_k", cr0_k)
         cr0_q = cr0_q.transpose(1, 2)
         cr0_k = cr0_k.transpose(1, 2)
         cr0_v = cr0_v.transpose(1, 2)
-        cr0_scores = torch.matmul(cr0_q.float(), cr0_k.float().transpose(-2, -1)) * self.attention_scale
-        cr0_probs = torch.softmax(cr0_scores, dim=-1).to(cr0_v.dtype)
+        cr0_scores = torch.matmul(cr0_q, cr0_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("cr0_scores", cr0_scores)
+        cr0_probs = torch.softmax(cr0_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("cr0_probs", cr0_probs)
         cr0_attn = torch.matmul(cr0_probs, cr0_v)
         cr0_attn = cr0_attn.transpose(1, 2).reshape(1, cap_state.shape[1], self.q_proj_dim)
         cr0_attn = torch.matmul(cr0_attn, self.cr0_attention_to_out_weight.t())
         cr0_attn = cr0_attn * torch.rsqrt(cr0_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr0_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("cr0_attn", cr0_attn)
         cap_state = cap_state + cr0_attn
+        if self.debug_nan:
+            debug_check_finite("cr0_state_after_attn", cap_state)
         cr0_ffn_in = cap_state * torch.rsqrt(cap_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr0_ffn_norm1_weight
         cr0_ffn_a = torch.matmul(cr0_ffn_in, self.cr0_feed_forward_w1_weight.t())
         cr0_ffn_b = torch.matmul(cr0_ffn_in, self.cr0_feed_forward_w3_weight.t())
         cr0_ffn = F.silu(cr0_ffn_a) * cr0_ffn_b
         cr0_ffn = torch.matmul(cr0_ffn, self.cr0_feed_forward_w2_weight.t())
         cr0_ffn = cr0_ffn * torch.rsqrt(cr0_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr0_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("cr0_ffn", cr0_ffn)
         cap_state = cap_state + cr0_ffn
+        if self.debug_nan:
+            debug_check_finite("cr0_state_after_ffn", cap_state)
 
         # cr1
         cr1_attn_in = cap_state * torch.rsqrt(cap_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr1_attention_norm1_weight
@@ -873,39 +987,60 @@ class ZImageTransformer2DModel(nn.Module):
         cr1_v = cr1_v.view(1, cap_state.shape[1], self.n_kv_heads, self.head_dim)
         cr1_q = cr1_q * torch.rsqrt(cr1_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr1_norm_q_weight.view(1, 1, 1, -1)
         cr1_k = cr1_k * torch.rsqrt(cr1_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr1_norm_k_weight.view(1, 1, 1, -1)
-        cr1_freqs_cos = cap_freqs.real.unsqueeze(2).to(cr1_attn_in.dtype)
-        cr1_freqs_sin = cap_freqs.imag.unsqueeze(2).to(cr1_attn_in.dtype)
+        cr1_freqs_cos = cap_freqs_cos.unsqueeze(2)
+        cr1_freqs_sin = cap_freqs_sin.unsqueeze(2)
         cr1_q_even = cr1_q[..., 0::2]
         cr1_q_odd = cr1_q[..., 1::2]
         cr1_q = torch.stack([cr1_q_even * cr1_freqs_cos - cr1_q_odd * cr1_freqs_sin, cr1_q_even * cr1_freqs_sin + cr1_q_odd * cr1_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("cr1_q", cr1_q)
         cr1_k_even = cr1_k[..., 0::2]
         cr1_k_odd = cr1_k[..., 1::2]
         cr1_k = torch.stack([cr1_k_even * cr1_freqs_cos - cr1_k_odd * cr1_freqs_sin, cr1_k_even * cr1_freqs_sin + cr1_k_odd * cr1_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("cr1_k", cr1_k)
         cr1_q = cr1_q.transpose(1, 2)
         cr1_k = cr1_k.transpose(1, 2)
         cr1_v = cr1_v.transpose(1, 2)
-        cr1_scores = torch.matmul(cr1_q.float(), cr1_k.float().transpose(-2, -1)) * self.attention_scale
-        cr1_probs = torch.softmax(cr1_scores, dim=-1).to(cr1_v.dtype)
+        cr1_scores = torch.matmul(cr1_q, cr1_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("cr1_scores", cr1_scores)
+        cr1_probs = torch.softmax(cr1_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("cr1_probs", cr1_probs)
         cr1_attn = torch.matmul(cr1_probs, cr1_v)
         cr1_attn = cr1_attn.transpose(1, 2).reshape(1, cap_state.shape[1], self.q_proj_dim)
         cr1_attn = torch.matmul(cr1_attn, self.cr1_attention_to_out_weight.t())
         cr1_attn = cr1_attn * torch.rsqrt(cr1_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr1_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("cr1_attn", cr1_attn)
         cap_state = cap_state + cr1_attn
+        if self.debug_nan:
+            debug_check_finite("cr1_state_after_attn", cap_state)
         cr1_ffn_in = cap_state * torch.rsqrt(cap_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr1_ffn_norm1_weight
         cr1_ffn_a = torch.matmul(cr1_ffn_in, self.cr1_feed_forward_w1_weight.t())
         cr1_ffn_b = torch.matmul(cr1_ffn_in, self.cr1_feed_forward_w3_weight.t())
         cr1_ffn = F.silu(cr1_ffn_a) * cr1_ffn_b
         cr1_ffn = torch.matmul(cr1_ffn, self.cr1_feed_forward_w2_weight.t())
         cr1_ffn = cr1_ffn * torch.rsqrt(cr1_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.cr1_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("cr1_ffn", cr1_ffn)
         cap_state = cap_state + cr1_ffn
+        if self.debug_nan:
+            debug_check_finite("cr1_state_after_ffn", cap_state)
 
         # unify image and caption streams
         unified_state = torch.cat([x_state, cap_state], dim=1)
-        unified_freqs = torch.cat([x_freqs, cap_freqs], dim=1)
+        if self.debug_nan:
+            debug_check_finite("unified_state", unified_state)
+        unified_freqs_cos = torch.cat([x_freqs_cos, cap_freqs_cos], dim=1)
+        unified_freqs_sin = torch.cat([x_freqs_sin, cap_freqs_sin], dim=1)
 
         # main transformer layers
         # layer0
         layer0_mod = torch.matmul(adaln_input, self.layer0_adaln_weight.t()) + self.layer0_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer0_mod", layer0_mod)
         layer0_mod = layer0_mod.unsqueeze(1)
         layer0_scale_msa, layer0_gate_msa, layer0_scale_mlp, layer0_gate_mlp = layer0_mod.chunk(4, dim=2)
         layer0_gate_msa = torch.tanh(layer0_gate_msa)
@@ -922,24 +1057,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer0_v = layer0_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer0_q = layer0_q * torch.rsqrt(layer0_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer0_norm_q_weight.view(1, 1, 1, -1)
         layer0_k = layer0_k * torch.rsqrt(layer0_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer0_norm_k_weight.view(1, 1, 1, -1)
-        layer0_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer0_attn_in.dtype)
-        layer0_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer0_attn_in.dtype)
+        layer0_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer0_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer0_q_even = layer0_q[..., 0::2]
         layer0_q_odd = layer0_q[..., 1::2]
         layer0_q = torch.stack([layer0_q_even * layer0_freqs_cos - layer0_q_odd * layer0_freqs_sin, layer0_q_even * layer0_freqs_sin + layer0_q_odd * layer0_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer0_q", layer0_q)
         layer0_k_even = layer0_k[..., 0::2]
         layer0_k_odd = layer0_k[..., 1::2]
         layer0_k = torch.stack([layer0_k_even * layer0_freqs_cos - layer0_k_odd * layer0_freqs_sin, layer0_k_even * layer0_freqs_sin + layer0_k_odd * layer0_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer0_k", layer0_k)
         layer0_q = layer0_q.transpose(1, 2)
         layer0_k = layer0_k.transpose(1, 2)
         layer0_v = layer0_v.transpose(1, 2)
-        layer0_scores = torch.matmul(layer0_q.float(), layer0_k.float().transpose(-2, -1)) * self.attention_scale
-        layer0_probs = torch.softmax(layer0_scores, dim=-1).to(layer0_v.dtype)
+        layer0_scores = torch.matmul(layer0_q, layer0_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer0_scores", layer0_scores)
+        layer0_probs = torch.softmax(layer0_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer0_probs", layer0_probs)
         layer0_attn = torch.matmul(layer0_probs, layer0_v)
         layer0_attn = layer0_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer0_attn = torch.matmul(layer0_attn, self.layer0_attention_to_out_weight.t())
         layer0_attn = layer0_attn * torch.rsqrt(layer0_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer0_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer0_attn", layer0_attn)
         unified_state = unified_state + layer0_gate_msa * layer0_attn
+        if self.debug_nan:
+            debug_check_finite("layer0_state_after_attn", unified_state)
         layer0_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer0_ffn_norm1_weight
         layer0_ffn_in = layer0_ffn_in * layer0_scale_mlp
         layer0_ffn_a = torch.matmul(layer0_ffn_in, self.layer0_feed_forward_w1_weight.t())
@@ -947,10 +1094,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer0_ffn = F.silu(layer0_ffn_a) * layer0_ffn_b
         layer0_ffn = torch.matmul(layer0_ffn, self.layer0_feed_forward_w2_weight.t())
         layer0_ffn = layer0_ffn * torch.rsqrt(layer0_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer0_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer0_ffn", layer0_ffn)
         unified_state = unified_state + layer0_gate_mlp * layer0_ffn
+        if self.debug_nan:
+            debug_check_finite("layer0_state_after_ffn", unified_state)
 
         # layer1
         layer1_mod = torch.matmul(adaln_input, self.layer1_adaln_weight.t()) + self.layer1_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer1_mod", layer1_mod)
         layer1_mod = layer1_mod.unsqueeze(1)
         layer1_scale_msa, layer1_gate_msa, layer1_scale_mlp, layer1_gate_mlp = layer1_mod.chunk(4, dim=2)
         layer1_gate_msa = torch.tanh(layer1_gate_msa)
@@ -967,24 +1120,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer1_v = layer1_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer1_q = layer1_q * torch.rsqrt(layer1_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer1_norm_q_weight.view(1, 1, 1, -1)
         layer1_k = layer1_k * torch.rsqrt(layer1_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer1_norm_k_weight.view(1, 1, 1, -1)
-        layer1_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer1_attn_in.dtype)
-        layer1_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer1_attn_in.dtype)
+        layer1_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer1_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer1_q_even = layer1_q[..., 0::2]
         layer1_q_odd = layer1_q[..., 1::2]
         layer1_q = torch.stack([layer1_q_even * layer1_freqs_cos - layer1_q_odd * layer1_freqs_sin, layer1_q_even * layer1_freqs_sin + layer1_q_odd * layer1_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer1_q", layer1_q)
         layer1_k_even = layer1_k[..., 0::2]
         layer1_k_odd = layer1_k[..., 1::2]
         layer1_k = torch.stack([layer1_k_even * layer1_freqs_cos - layer1_k_odd * layer1_freqs_sin, layer1_k_even * layer1_freqs_sin + layer1_k_odd * layer1_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer1_k", layer1_k)
         layer1_q = layer1_q.transpose(1, 2)
         layer1_k = layer1_k.transpose(1, 2)
         layer1_v = layer1_v.transpose(1, 2)
-        layer1_scores = torch.matmul(layer1_q.float(), layer1_k.float().transpose(-2, -1)) * self.attention_scale
-        layer1_probs = torch.softmax(layer1_scores, dim=-1).to(layer1_v.dtype)
+        layer1_scores = torch.matmul(layer1_q, layer1_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer1_scores", layer1_scores)
+        layer1_probs = torch.softmax(layer1_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer1_probs", layer1_probs)
         layer1_attn = torch.matmul(layer1_probs, layer1_v)
         layer1_attn = layer1_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer1_attn = torch.matmul(layer1_attn, self.layer1_attention_to_out_weight.t())
         layer1_attn = layer1_attn * torch.rsqrt(layer1_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer1_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer1_attn", layer1_attn)
         unified_state = unified_state + layer1_gate_msa * layer1_attn
+        if self.debug_nan:
+            debug_check_finite("layer1_state_after_attn", unified_state)
         layer1_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer1_ffn_norm1_weight
         layer1_ffn_in = layer1_ffn_in * layer1_scale_mlp
         layer1_ffn_a = torch.matmul(layer1_ffn_in, self.layer1_feed_forward_w1_weight.t())
@@ -992,10 +1157,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer1_ffn = F.silu(layer1_ffn_a) * layer1_ffn_b
         layer1_ffn = torch.matmul(layer1_ffn, self.layer1_feed_forward_w2_weight.t())
         layer1_ffn = layer1_ffn * torch.rsqrt(layer1_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer1_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer1_ffn", layer1_ffn)
         unified_state = unified_state + layer1_gate_mlp * layer1_ffn
+        if self.debug_nan:
+            debug_check_finite("layer1_state_after_ffn", unified_state)
 
         # layer2
         layer2_mod = torch.matmul(adaln_input, self.layer2_adaln_weight.t()) + self.layer2_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer2_mod", layer2_mod)
         layer2_mod = layer2_mod.unsqueeze(1)
         layer2_scale_msa, layer2_gate_msa, layer2_scale_mlp, layer2_gate_mlp = layer2_mod.chunk(4, dim=2)
         layer2_gate_msa = torch.tanh(layer2_gate_msa)
@@ -1012,24 +1183,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer2_v = layer2_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer2_q = layer2_q * torch.rsqrt(layer2_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer2_norm_q_weight.view(1, 1, 1, -1)
         layer2_k = layer2_k * torch.rsqrt(layer2_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer2_norm_k_weight.view(1, 1, 1, -1)
-        layer2_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer2_attn_in.dtype)
-        layer2_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer2_attn_in.dtype)
+        layer2_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer2_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer2_q_even = layer2_q[..., 0::2]
         layer2_q_odd = layer2_q[..., 1::2]
         layer2_q = torch.stack([layer2_q_even * layer2_freqs_cos - layer2_q_odd * layer2_freqs_sin, layer2_q_even * layer2_freqs_sin + layer2_q_odd * layer2_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer2_q", layer2_q)
         layer2_k_even = layer2_k[..., 0::2]
         layer2_k_odd = layer2_k[..., 1::2]
         layer2_k = torch.stack([layer2_k_even * layer2_freqs_cos - layer2_k_odd * layer2_freqs_sin, layer2_k_even * layer2_freqs_sin + layer2_k_odd * layer2_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer2_k", layer2_k)
         layer2_q = layer2_q.transpose(1, 2)
         layer2_k = layer2_k.transpose(1, 2)
         layer2_v = layer2_v.transpose(1, 2)
-        layer2_scores = torch.matmul(layer2_q.float(), layer2_k.float().transpose(-2, -1)) * self.attention_scale
-        layer2_probs = torch.softmax(layer2_scores, dim=-1).to(layer2_v.dtype)
+        layer2_scores = torch.matmul(layer2_q, layer2_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer2_scores", layer2_scores)
+        layer2_probs = torch.softmax(layer2_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer2_probs", layer2_probs)
         layer2_attn = torch.matmul(layer2_probs, layer2_v)
         layer2_attn = layer2_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer2_attn = torch.matmul(layer2_attn, self.layer2_attention_to_out_weight.t())
         layer2_attn = layer2_attn * torch.rsqrt(layer2_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer2_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer2_attn", layer2_attn)
         unified_state = unified_state + layer2_gate_msa * layer2_attn
+        if self.debug_nan:
+            debug_check_finite("layer2_state_after_attn", unified_state)
         layer2_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer2_ffn_norm1_weight
         layer2_ffn_in = layer2_ffn_in * layer2_scale_mlp
         layer2_ffn_a = torch.matmul(layer2_ffn_in, self.layer2_feed_forward_w1_weight.t())
@@ -1037,10 +1220,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer2_ffn = F.silu(layer2_ffn_a) * layer2_ffn_b
         layer2_ffn = torch.matmul(layer2_ffn, self.layer2_feed_forward_w2_weight.t())
         layer2_ffn = layer2_ffn * torch.rsqrt(layer2_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer2_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer2_ffn", layer2_ffn)
         unified_state = unified_state + layer2_gate_mlp * layer2_ffn
+        if self.debug_nan:
+            debug_check_finite("layer2_state_after_ffn", unified_state)
 
         # layer3
         layer3_mod = torch.matmul(adaln_input, self.layer3_adaln_weight.t()) + self.layer3_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer3_mod", layer3_mod)
         layer3_mod = layer3_mod.unsqueeze(1)
         layer3_scale_msa, layer3_gate_msa, layer3_scale_mlp, layer3_gate_mlp = layer3_mod.chunk(4, dim=2)
         layer3_gate_msa = torch.tanh(layer3_gate_msa)
@@ -1057,24 +1246,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer3_v = layer3_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer3_q = layer3_q * torch.rsqrt(layer3_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer3_norm_q_weight.view(1, 1, 1, -1)
         layer3_k = layer3_k * torch.rsqrt(layer3_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer3_norm_k_weight.view(1, 1, 1, -1)
-        layer3_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer3_attn_in.dtype)
-        layer3_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer3_attn_in.dtype)
+        layer3_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer3_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer3_q_even = layer3_q[..., 0::2]
         layer3_q_odd = layer3_q[..., 1::2]
         layer3_q = torch.stack([layer3_q_even * layer3_freqs_cos - layer3_q_odd * layer3_freqs_sin, layer3_q_even * layer3_freqs_sin + layer3_q_odd * layer3_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer3_q", layer3_q)
         layer3_k_even = layer3_k[..., 0::2]
         layer3_k_odd = layer3_k[..., 1::2]
         layer3_k = torch.stack([layer3_k_even * layer3_freqs_cos - layer3_k_odd * layer3_freqs_sin, layer3_k_even * layer3_freqs_sin + layer3_k_odd * layer3_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer3_k", layer3_k)
         layer3_q = layer3_q.transpose(1, 2)
         layer3_k = layer3_k.transpose(1, 2)
         layer3_v = layer3_v.transpose(1, 2)
-        layer3_scores = torch.matmul(layer3_q.float(), layer3_k.float().transpose(-2, -1)) * self.attention_scale
-        layer3_probs = torch.softmax(layer3_scores, dim=-1).to(layer3_v.dtype)
+        layer3_scores = torch.matmul(layer3_q, layer3_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer3_scores", layer3_scores)
+        layer3_probs = torch.softmax(layer3_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer3_probs", layer3_probs)
         layer3_attn = torch.matmul(layer3_probs, layer3_v)
         layer3_attn = layer3_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer3_attn = torch.matmul(layer3_attn, self.layer3_attention_to_out_weight.t())
         layer3_attn = layer3_attn * torch.rsqrt(layer3_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer3_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer3_attn", layer3_attn)
         unified_state = unified_state + layer3_gate_msa * layer3_attn
+        if self.debug_nan:
+            debug_check_finite("layer3_state_after_attn", unified_state)
         layer3_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer3_ffn_norm1_weight
         layer3_ffn_in = layer3_ffn_in * layer3_scale_mlp
         layer3_ffn_a = torch.matmul(layer3_ffn_in, self.layer3_feed_forward_w1_weight.t())
@@ -1082,10 +1283,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer3_ffn = F.silu(layer3_ffn_a) * layer3_ffn_b
         layer3_ffn = torch.matmul(layer3_ffn, self.layer3_feed_forward_w2_weight.t())
         layer3_ffn = layer3_ffn * torch.rsqrt(layer3_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer3_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer3_ffn", layer3_ffn)
         unified_state = unified_state + layer3_gate_mlp * layer3_ffn
+        if self.debug_nan:
+            debug_check_finite("layer3_state_after_ffn", unified_state)
 
         # layer4
         layer4_mod = torch.matmul(adaln_input, self.layer4_adaln_weight.t()) + self.layer4_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer4_mod", layer4_mod)
         layer4_mod = layer4_mod.unsqueeze(1)
         layer4_scale_msa, layer4_gate_msa, layer4_scale_mlp, layer4_gate_mlp = layer4_mod.chunk(4, dim=2)
         layer4_gate_msa = torch.tanh(layer4_gate_msa)
@@ -1102,24 +1309,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer4_v = layer4_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer4_q = layer4_q * torch.rsqrt(layer4_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer4_norm_q_weight.view(1, 1, 1, -1)
         layer4_k = layer4_k * torch.rsqrt(layer4_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer4_norm_k_weight.view(1, 1, 1, -1)
-        layer4_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer4_attn_in.dtype)
-        layer4_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer4_attn_in.dtype)
+        layer4_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer4_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer4_q_even = layer4_q[..., 0::2]
         layer4_q_odd = layer4_q[..., 1::2]
         layer4_q = torch.stack([layer4_q_even * layer4_freqs_cos - layer4_q_odd * layer4_freqs_sin, layer4_q_even * layer4_freqs_sin + layer4_q_odd * layer4_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer4_q", layer4_q)
         layer4_k_even = layer4_k[..., 0::2]
         layer4_k_odd = layer4_k[..., 1::2]
         layer4_k = torch.stack([layer4_k_even * layer4_freqs_cos - layer4_k_odd * layer4_freqs_sin, layer4_k_even * layer4_freqs_sin + layer4_k_odd * layer4_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer4_k", layer4_k)
         layer4_q = layer4_q.transpose(1, 2)
         layer4_k = layer4_k.transpose(1, 2)
         layer4_v = layer4_v.transpose(1, 2)
-        layer4_scores = torch.matmul(layer4_q.float(), layer4_k.float().transpose(-2, -1)) * self.attention_scale
-        layer4_probs = torch.softmax(layer4_scores, dim=-1).to(layer4_v.dtype)
+        layer4_scores = torch.matmul(layer4_q, layer4_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer4_scores", layer4_scores)
+        layer4_probs = torch.softmax(layer4_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer4_probs", layer4_probs)
         layer4_attn = torch.matmul(layer4_probs, layer4_v)
         layer4_attn = layer4_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer4_attn = torch.matmul(layer4_attn, self.layer4_attention_to_out_weight.t())
         layer4_attn = layer4_attn * torch.rsqrt(layer4_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer4_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer4_attn", layer4_attn)
         unified_state = unified_state + layer4_gate_msa * layer4_attn
+        if self.debug_nan:
+            debug_check_finite("layer4_state_after_attn", unified_state)
         layer4_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer4_ffn_norm1_weight
         layer4_ffn_in = layer4_ffn_in * layer4_scale_mlp
         layer4_ffn_a = torch.matmul(layer4_ffn_in, self.layer4_feed_forward_w1_weight.t())
@@ -1127,10 +1346,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer4_ffn = F.silu(layer4_ffn_a) * layer4_ffn_b
         layer4_ffn = torch.matmul(layer4_ffn, self.layer4_feed_forward_w2_weight.t())
         layer4_ffn = layer4_ffn * torch.rsqrt(layer4_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer4_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer4_ffn", layer4_ffn)
         unified_state = unified_state + layer4_gate_mlp * layer4_ffn
+        if self.debug_nan:
+            debug_check_finite("layer4_state_after_ffn", unified_state)
 
         # layer5
         layer5_mod = torch.matmul(adaln_input, self.layer5_adaln_weight.t()) + self.layer5_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer5_mod", layer5_mod)
         layer5_mod = layer5_mod.unsqueeze(1)
         layer5_scale_msa, layer5_gate_msa, layer5_scale_mlp, layer5_gate_mlp = layer5_mod.chunk(4, dim=2)
         layer5_gate_msa = torch.tanh(layer5_gate_msa)
@@ -1147,24 +1372,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer5_v = layer5_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer5_q = layer5_q * torch.rsqrt(layer5_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer5_norm_q_weight.view(1, 1, 1, -1)
         layer5_k = layer5_k * torch.rsqrt(layer5_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer5_norm_k_weight.view(1, 1, 1, -1)
-        layer5_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer5_attn_in.dtype)
-        layer5_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer5_attn_in.dtype)
+        layer5_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer5_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer5_q_even = layer5_q[..., 0::2]
         layer5_q_odd = layer5_q[..., 1::2]
         layer5_q = torch.stack([layer5_q_even * layer5_freqs_cos - layer5_q_odd * layer5_freqs_sin, layer5_q_even * layer5_freqs_sin + layer5_q_odd * layer5_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer5_q", layer5_q)
         layer5_k_even = layer5_k[..., 0::2]
         layer5_k_odd = layer5_k[..., 1::2]
         layer5_k = torch.stack([layer5_k_even * layer5_freqs_cos - layer5_k_odd * layer5_freqs_sin, layer5_k_even * layer5_freqs_sin + layer5_k_odd * layer5_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer5_k", layer5_k)
         layer5_q = layer5_q.transpose(1, 2)
         layer5_k = layer5_k.transpose(1, 2)
         layer5_v = layer5_v.transpose(1, 2)
-        layer5_scores = torch.matmul(layer5_q.float(), layer5_k.float().transpose(-2, -1)) * self.attention_scale
-        layer5_probs = torch.softmax(layer5_scores, dim=-1).to(layer5_v.dtype)
+        layer5_scores = torch.matmul(layer5_q, layer5_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer5_scores", layer5_scores)
+        layer5_probs = torch.softmax(layer5_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer5_probs", layer5_probs)
         layer5_attn = torch.matmul(layer5_probs, layer5_v)
         layer5_attn = layer5_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer5_attn = torch.matmul(layer5_attn, self.layer5_attention_to_out_weight.t())
         layer5_attn = layer5_attn * torch.rsqrt(layer5_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer5_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer5_attn", layer5_attn)
         unified_state = unified_state + layer5_gate_msa * layer5_attn
+        if self.debug_nan:
+            debug_check_finite("layer5_state_after_attn", unified_state)
         layer5_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer5_ffn_norm1_weight
         layer5_ffn_in = layer5_ffn_in * layer5_scale_mlp
         layer5_ffn_a = torch.matmul(layer5_ffn_in, self.layer5_feed_forward_w1_weight.t())
@@ -1172,10 +1409,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer5_ffn = F.silu(layer5_ffn_a) * layer5_ffn_b
         layer5_ffn = torch.matmul(layer5_ffn, self.layer5_feed_forward_w2_weight.t())
         layer5_ffn = layer5_ffn * torch.rsqrt(layer5_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer5_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer5_ffn", layer5_ffn)
         unified_state = unified_state + layer5_gate_mlp * layer5_ffn
+        if self.debug_nan:
+            debug_check_finite("layer5_state_after_ffn", unified_state)
 
         # layer6
         layer6_mod = torch.matmul(adaln_input, self.layer6_adaln_weight.t()) + self.layer6_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer6_mod", layer6_mod)
         layer6_mod = layer6_mod.unsqueeze(1)
         layer6_scale_msa, layer6_gate_msa, layer6_scale_mlp, layer6_gate_mlp = layer6_mod.chunk(4, dim=2)
         layer6_gate_msa = torch.tanh(layer6_gate_msa)
@@ -1192,25 +1435,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer6_v = layer6_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer6_q = layer6_q * torch.rsqrt(layer6_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer6_norm_q_weight.view(1, 1, 1, -1)
         layer6_k = layer6_k * torch.rsqrt(layer6_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer6_norm_k_weight.view(1, 1, 1, -1)
-        layer6_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer6_attn_in.dtype)
-        layer6_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer6_attn_in.dtype)
+        layer6_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer6_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer6_q_even = layer6_q[..., 0::2]
         layer6_q_odd = layer6_q[..., 1::2]
         layer6_q = torch.stack([layer6_q_even * layer6_freqs_cos - layer6_q_odd * layer6_freqs_sin, layer6_q_even * layer6_freqs_sin + layer6_q_odd * layer6_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer6_q", layer6_q)
         layer6_k_even = layer6_k[..., 0::2]
         layer6_k_odd = layer6_k[..., 1::2]
         layer6_k = torch.stack([layer6_k_even * layer6_freqs_cos - layer6_k_odd * layer6_freqs_sin, layer6_k_even * layer6_freqs_sin + layer6_k_odd * layer6_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer6_k", layer6_k)
         layer6_q = layer6_q.transpose(1, 2)
         layer6_k = layer6_k.transpose(1, 2)
         layer6_v = layer6_v.transpose(1, 2)
-        layer6_scores = torch.matmul(layer6_q.float(), layer6_k.float().transpose(-2, -1)) * self.attention_scale
-        layer6_probs = torch.softmax(layer6_scores, dim=-1).to(layer6_v.dtype)
+        layer6_scores = torch.matmul(layer6_q, layer6_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer6_scores", layer6_scores)
+        layer6_probs = torch.softmax(layer6_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer6_probs", layer6_probs)
         layer6_attn = torch.matmul(layer6_probs, layer6_v)
-        print("layer6_attn.shape:",layer6_attn.shape)
         layer6_attn = layer6_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer6_attn = torch.matmul(layer6_attn, self.layer6_attention_to_out_weight.t())
         layer6_attn = layer6_attn * torch.rsqrt(layer6_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer6_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer6_attn", layer6_attn)
         unified_state = unified_state + layer6_gate_msa * layer6_attn
+        if self.debug_nan:
+            debug_check_finite("layer6_state_after_attn", unified_state)
         layer6_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer6_ffn_norm1_weight
         layer6_ffn_in = layer6_ffn_in * layer6_scale_mlp
         layer6_ffn_a = torch.matmul(layer6_ffn_in, self.layer6_feed_forward_w1_weight.t())
@@ -1218,10 +1472,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer6_ffn = F.silu(layer6_ffn_a) * layer6_ffn_b
         layer6_ffn = torch.matmul(layer6_ffn, self.layer6_feed_forward_w2_weight.t())
         layer6_ffn = layer6_ffn * torch.rsqrt(layer6_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer6_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer6_ffn", layer6_ffn)
         unified_state = unified_state + layer6_gate_mlp * layer6_ffn
+        if self.debug_nan:
+            debug_check_finite("layer6_state_after_ffn", unified_state)
 
         # layer7
         layer7_mod = torch.matmul(adaln_input, self.layer7_adaln_weight.t()) + self.layer7_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer7_mod", layer7_mod)
         layer7_mod = layer7_mod.unsqueeze(1)
         layer7_scale_msa, layer7_gate_msa, layer7_scale_mlp, layer7_gate_mlp = layer7_mod.chunk(4, dim=2)
         layer7_gate_msa = torch.tanh(layer7_gate_msa)
@@ -1238,24 +1498,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer7_v = layer7_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer7_q = layer7_q * torch.rsqrt(layer7_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer7_norm_q_weight.view(1, 1, 1, -1)
         layer7_k = layer7_k * torch.rsqrt(layer7_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer7_norm_k_weight.view(1, 1, 1, -1)
-        layer7_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer7_attn_in.dtype)
-        layer7_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer7_attn_in.dtype)
+        layer7_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer7_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer7_q_even = layer7_q[..., 0::2]
         layer7_q_odd = layer7_q[..., 1::2]
         layer7_q = torch.stack([layer7_q_even * layer7_freqs_cos - layer7_q_odd * layer7_freqs_sin, layer7_q_even * layer7_freqs_sin + layer7_q_odd * layer7_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer7_q", layer7_q)
         layer7_k_even = layer7_k[..., 0::2]
         layer7_k_odd = layer7_k[..., 1::2]
         layer7_k = torch.stack([layer7_k_even * layer7_freqs_cos - layer7_k_odd * layer7_freqs_sin, layer7_k_even * layer7_freqs_sin + layer7_k_odd * layer7_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer7_k", layer7_k)
         layer7_q = layer7_q.transpose(1, 2)
         layer7_k = layer7_k.transpose(1, 2)
         layer7_v = layer7_v.transpose(1, 2)
-        layer7_scores = torch.matmul(layer7_q.float(), layer7_k.float().transpose(-2, -1)) * self.attention_scale
-        layer7_probs = torch.softmax(layer7_scores, dim=-1).to(layer7_v.dtype)
+        layer7_scores = torch.matmul(layer7_q, layer7_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer7_scores", layer7_scores)
+        layer7_probs = torch.softmax(layer7_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer7_probs", layer7_probs)
         layer7_attn = torch.matmul(layer7_probs, layer7_v)
         layer7_attn = layer7_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer7_attn = torch.matmul(layer7_attn, self.layer7_attention_to_out_weight.t())
         layer7_attn = layer7_attn * torch.rsqrt(layer7_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer7_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer7_attn", layer7_attn)
         unified_state = unified_state + layer7_gate_msa * layer7_attn
+        if self.debug_nan:
+            debug_check_finite("layer7_state_after_attn", unified_state)
         layer7_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer7_ffn_norm1_weight
         layer7_ffn_in = layer7_ffn_in * layer7_scale_mlp
         layer7_ffn_a = torch.matmul(layer7_ffn_in, self.layer7_feed_forward_w1_weight.t())
@@ -1263,10 +1535,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer7_ffn = F.silu(layer7_ffn_a) * layer7_ffn_b
         layer7_ffn = torch.matmul(layer7_ffn, self.layer7_feed_forward_w2_weight.t())
         layer7_ffn = layer7_ffn * torch.rsqrt(layer7_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer7_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer7_ffn", layer7_ffn)
         unified_state = unified_state + layer7_gate_mlp * layer7_ffn
+        if self.debug_nan:
+            debug_check_finite("layer7_state_after_ffn", unified_state)
 
         # layer8
         layer8_mod = torch.matmul(adaln_input, self.layer8_adaln_weight.t()) + self.layer8_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer8_mod", layer8_mod)
         layer8_mod = layer8_mod.unsqueeze(1)
         layer8_scale_msa, layer8_gate_msa, layer8_scale_mlp, layer8_gate_mlp = layer8_mod.chunk(4, dim=2)
         layer8_gate_msa = torch.tanh(layer8_gate_msa)
@@ -1283,24 +1561,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer8_v = layer8_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer8_q = layer8_q * torch.rsqrt(layer8_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer8_norm_q_weight.view(1, 1, 1, -1)
         layer8_k = layer8_k * torch.rsqrt(layer8_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer8_norm_k_weight.view(1, 1, 1, -1)
-        layer8_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer8_attn_in.dtype)
-        layer8_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer8_attn_in.dtype)
+        layer8_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer8_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer8_q_even = layer8_q[..., 0::2]
         layer8_q_odd = layer8_q[..., 1::2]
         layer8_q = torch.stack([layer8_q_even * layer8_freqs_cos - layer8_q_odd * layer8_freqs_sin, layer8_q_even * layer8_freqs_sin + layer8_q_odd * layer8_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer8_q", layer8_q)
         layer8_k_even = layer8_k[..., 0::2]
         layer8_k_odd = layer8_k[..., 1::2]
         layer8_k = torch.stack([layer8_k_even * layer8_freqs_cos - layer8_k_odd * layer8_freqs_sin, layer8_k_even * layer8_freqs_sin + layer8_k_odd * layer8_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer8_k", layer8_k)
         layer8_q = layer8_q.transpose(1, 2)
         layer8_k = layer8_k.transpose(1, 2)
         layer8_v = layer8_v.transpose(1, 2)
-        layer8_scores = torch.matmul(layer8_q.float(), layer8_k.float().transpose(-2, -1)) * self.attention_scale
-        layer8_probs = torch.softmax(layer8_scores, dim=-1).to(layer8_v.dtype)
+        layer8_scores = torch.matmul(layer8_q, layer8_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer8_scores", layer8_scores)
+        layer8_probs = torch.softmax(layer8_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer8_probs", layer8_probs)
         layer8_attn = torch.matmul(layer8_probs, layer8_v)
         layer8_attn = layer8_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer8_attn = torch.matmul(layer8_attn, self.layer8_attention_to_out_weight.t())
         layer8_attn = layer8_attn * torch.rsqrt(layer8_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer8_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer8_attn", layer8_attn)
         unified_state = unified_state + layer8_gate_msa * layer8_attn
+        if self.debug_nan:
+            debug_check_finite("layer8_state_after_attn", unified_state)
         layer8_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer8_ffn_norm1_weight
         layer8_ffn_in = layer8_ffn_in * layer8_scale_mlp
         layer8_ffn_a = torch.matmul(layer8_ffn_in, self.layer8_feed_forward_w1_weight.t())
@@ -1308,10 +1598,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer8_ffn = F.silu(layer8_ffn_a) * layer8_ffn_b
         layer8_ffn = torch.matmul(layer8_ffn, self.layer8_feed_forward_w2_weight.t())
         layer8_ffn = layer8_ffn * torch.rsqrt(layer8_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer8_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer8_ffn", layer8_ffn)
         unified_state = unified_state + layer8_gate_mlp * layer8_ffn
+        if self.debug_nan:
+            debug_check_finite("layer8_state_after_ffn", unified_state)
 
         # layer9
         layer9_mod = torch.matmul(adaln_input, self.layer9_adaln_weight.t()) + self.layer9_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer9_mod", layer9_mod)
         layer9_mod = layer9_mod.unsqueeze(1)
         layer9_scale_msa, layer9_gate_msa, layer9_scale_mlp, layer9_gate_mlp = layer9_mod.chunk(4, dim=2)
         layer9_gate_msa = torch.tanh(layer9_gate_msa)
@@ -1328,24 +1624,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer9_v = layer9_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer9_q = layer9_q * torch.rsqrt(layer9_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer9_norm_q_weight.view(1, 1, 1, -1)
         layer9_k = layer9_k * torch.rsqrt(layer9_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer9_norm_k_weight.view(1, 1, 1, -1)
-        layer9_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer9_attn_in.dtype)
-        layer9_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer9_attn_in.dtype)
+        layer9_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer9_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer9_q_even = layer9_q[..., 0::2]
         layer9_q_odd = layer9_q[..., 1::2]
         layer9_q = torch.stack([layer9_q_even * layer9_freqs_cos - layer9_q_odd * layer9_freqs_sin, layer9_q_even * layer9_freqs_sin + layer9_q_odd * layer9_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer9_q", layer9_q)
         layer9_k_even = layer9_k[..., 0::2]
         layer9_k_odd = layer9_k[..., 1::2]
         layer9_k = torch.stack([layer9_k_even * layer9_freqs_cos - layer9_k_odd * layer9_freqs_sin, layer9_k_even * layer9_freqs_sin + layer9_k_odd * layer9_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer9_k", layer9_k)
         layer9_q = layer9_q.transpose(1, 2)
         layer9_k = layer9_k.transpose(1, 2)
         layer9_v = layer9_v.transpose(1, 2)
-        layer9_scores = torch.matmul(layer9_q.float(), layer9_k.float().transpose(-2, -1)) * self.attention_scale
-        layer9_probs = torch.softmax(layer9_scores, dim=-1).to(layer9_v.dtype)
+        layer9_scores = torch.matmul(layer9_q, layer9_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer9_scores", layer9_scores)
+        layer9_probs = torch.softmax(layer9_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer9_probs", layer9_probs)
         layer9_attn = torch.matmul(layer9_probs, layer9_v)
         layer9_attn = layer9_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer9_attn = torch.matmul(layer9_attn, self.layer9_attention_to_out_weight.t())
         layer9_attn = layer9_attn * torch.rsqrt(layer9_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer9_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer9_attn", layer9_attn)
         unified_state = unified_state + layer9_gate_msa * layer9_attn
+        if self.debug_nan:
+            debug_check_finite("layer9_state_after_attn", unified_state)
         layer9_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer9_ffn_norm1_weight
         layer9_ffn_in = layer9_ffn_in * layer9_scale_mlp
         layer9_ffn_a = torch.matmul(layer9_ffn_in, self.layer9_feed_forward_w1_weight.t())
@@ -1353,10 +1661,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer9_ffn = F.silu(layer9_ffn_a) * layer9_ffn_b
         layer9_ffn = torch.matmul(layer9_ffn, self.layer9_feed_forward_w2_weight.t())
         layer9_ffn = layer9_ffn * torch.rsqrt(layer9_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer9_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer9_ffn", layer9_ffn)
         unified_state = unified_state + layer9_gate_mlp * layer9_ffn
+        if self.debug_nan:
+            debug_check_finite("layer9_state_after_ffn", unified_state)
 
         # layer10
         layer10_mod = torch.matmul(adaln_input, self.layer10_adaln_weight.t()) + self.layer10_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer10_mod", layer10_mod)
         layer10_mod = layer10_mod.unsqueeze(1)
         layer10_scale_msa, layer10_gate_msa, layer10_scale_mlp, layer10_gate_mlp = layer10_mod.chunk(4, dim=2)
         layer10_gate_msa = torch.tanh(layer10_gate_msa)
@@ -1373,24 +1687,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer10_v = layer10_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer10_q = layer10_q * torch.rsqrt(layer10_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_q_weight.view(1, 1, 1, -1)
         layer10_k = layer10_k * torch.rsqrt(layer10_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_norm_k_weight.view(1, 1, 1, -1)
-        layer10_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer10_attn_in.dtype)
-        layer10_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer10_attn_in.dtype)
+        layer10_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer10_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer10_q_even = layer10_q[..., 0::2]
         layer10_q_odd = layer10_q[..., 1::2]
         layer10_q = torch.stack([layer10_q_even * layer10_freqs_cos - layer10_q_odd * layer10_freqs_sin, layer10_q_even * layer10_freqs_sin + layer10_q_odd * layer10_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer10_q", layer10_q)
         layer10_k_even = layer10_k[..., 0::2]
         layer10_k_odd = layer10_k[..., 1::2]
         layer10_k = torch.stack([layer10_k_even * layer10_freqs_cos - layer10_k_odd * layer10_freqs_sin, layer10_k_even * layer10_freqs_sin + layer10_k_odd * layer10_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer10_k", layer10_k)
         layer10_q = layer10_q.transpose(1, 2)
         layer10_k = layer10_k.transpose(1, 2)
         layer10_v = layer10_v.transpose(1, 2)
-        layer10_scores = torch.matmul(layer10_q.float(), layer10_k.float().transpose(-2, -1)) * self.attention_scale
-        layer10_probs = torch.softmax(layer10_scores, dim=-1).to(layer10_v.dtype)
+        layer10_scores = torch.matmul(layer10_q, layer10_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer10_scores", layer10_scores)
+        layer10_probs = torch.softmax(layer10_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer10_probs", layer10_probs)
         layer10_attn = torch.matmul(layer10_probs, layer10_v)
         layer10_attn = layer10_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer10_attn = torch.matmul(layer10_attn, self.layer10_attention_to_out_weight.t())
         layer10_attn = layer10_attn * torch.rsqrt(layer10_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer10_attn", layer10_attn)
         unified_state = unified_state + layer10_gate_msa * layer10_attn
+        if self.debug_nan:
+            debug_check_finite("layer10_state_after_attn", unified_state)
         layer10_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm1_weight
         layer10_ffn_in = layer10_ffn_in * layer10_scale_mlp
         layer10_ffn_a = torch.matmul(layer10_ffn_in, self.layer10_feed_forward_w1_weight.t())
@@ -1398,10 +1724,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer10_ffn = F.silu(layer10_ffn_a) * layer10_ffn_b
         layer10_ffn = torch.matmul(layer10_ffn, self.layer10_feed_forward_w2_weight.t())
         layer10_ffn = layer10_ffn * torch.rsqrt(layer10_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer10_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer10_ffn", layer10_ffn)
         unified_state = unified_state + layer10_gate_mlp * layer10_ffn
+        if self.debug_nan:
+            debug_check_finite("layer10_state_after_ffn", unified_state)
 
         # layer11
         layer11_mod = torch.matmul(adaln_input, self.layer11_adaln_weight.t()) + self.layer11_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer11_mod", layer11_mod)
         layer11_mod = layer11_mod.unsqueeze(1)
         layer11_scale_msa, layer11_gate_msa, layer11_scale_mlp, layer11_gate_mlp = layer11_mod.chunk(4, dim=2)
         layer11_gate_msa = torch.tanh(layer11_gate_msa)
@@ -1418,24 +1750,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer11_v = layer11_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer11_q = layer11_q * torch.rsqrt(layer11_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer11_norm_q_weight.view(1, 1, 1, -1)
         layer11_k = layer11_k * torch.rsqrt(layer11_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer11_norm_k_weight.view(1, 1, 1, -1)
-        layer11_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer11_attn_in.dtype)
-        layer11_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer11_attn_in.dtype)
+        layer11_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer11_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer11_q_even = layer11_q[..., 0::2]
         layer11_q_odd = layer11_q[..., 1::2]
         layer11_q = torch.stack([layer11_q_even * layer11_freqs_cos - layer11_q_odd * layer11_freqs_sin, layer11_q_even * layer11_freqs_sin + layer11_q_odd * layer11_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer11_q", layer11_q)
         layer11_k_even = layer11_k[..., 0::2]
         layer11_k_odd = layer11_k[..., 1::2]
         layer11_k = torch.stack([layer11_k_even * layer11_freqs_cos - layer11_k_odd * layer11_freqs_sin, layer11_k_even * layer11_freqs_sin + layer11_k_odd * layer11_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer11_k", layer11_k)
         layer11_q = layer11_q.transpose(1, 2)
         layer11_k = layer11_k.transpose(1, 2)
         layer11_v = layer11_v.transpose(1, 2)
-        layer11_scores = torch.matmul(layer11_q.float(), layer11_k.float().transpose(-2, -1)) * self.attention_scale
-        layer11_probs = torch.softmax(layer11_scores, dim=-1).to(layer11_v.dtype)
+        layer11_scores = torch.matmul(layer11_q, layer11_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer11_scores", layer11_scores)
+        layer11_probs = torch.softmax(layer11_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer11_probs", layer11_probs)
         layer11_attn = torch.matmul(layer11_probs, layer11_v)
         layer11_attn = layer11_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer11_attn = torch.matmul(layer11_attn, self.layer11_attention_to_out_weight.t())
         layer11_attn = layer11_attn * torch.rsqrt(layer11_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer11_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer11_attn", layer11_attn)
         unified_state = unified_state + layer11_gate_msa * layer11_attn
+        if self.debug_nan:
+            debug_check_finite("layer11_state_after_attn", unified_state)
         layer11_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer11_ffn_norm1_weight
         layer11_ffn_in = layer11_ffn_in * layer11_scale_mlp
         layer11_ffn_a = torch.matmul(layer11_ffn_in, self.layer11_feed_forward_w1_weight.t())
@@ -1443,10 +1787,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer11_ffn = F.silu(layer11_ffn_a) * layer11_ffn_b
         layer11_ffn = torch.matmul(layer11_ffn, self.layer11_feed_forward_w2_weight.t())
         layer11_ffn = layer11_ffn * torch.rsqrt(layer11_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer11_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer11_ffn", layer11_ffn)
         unified_state = unified_state + layer11_gate_mlp * layer11_ffn
+        if self.debug_nan:
+            debug_check_finite("layer11_state_after_ffn", unified_state)
 
         # layer12
         layer12_mod = torch.matmul(adaln_input, self.layer12_adaln_weight.t()) + self.layer12_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer12_mod", layer12_mod)
         layer12_mod = layer12_mod.unsqueeze(1)
         layer12_scale_msa, layer12_gate_msa, layer12_scale_mlp, layer12_gate_mlp = layer12_mod.chunk(4, dim=2)
         layer12_gate_msa = torch.tanh(layer12_gate_msa)
@@ -1463,24 +1813,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer12_v = layer12_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer12_q = layer12_q * torch.rsqrt(layer12_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer12_norm_q_weight.view(1, 1, 1, -1)
         layer12_k = layer12_k * torch.rsqrt(layer12_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer12_norm_k_weight.view(1, 1, 1, -1)
-        layer12_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer12_attn_in.dtype)
-        layer12_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer12_attn_in.dtype)
+        layer12_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer12_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer12_q_even = layer12_q[..., 0::2]
         layer12_q_odd = layer12_q[..., 1::2]
         layer12_q = torch.stack([layer12_q_even * layer12_freqs_cos - layer12_q_odd * layer12_freqs_sin, layer12_q_even * layer12_freqs_sin + layer12_q_odd * layer12_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer12_q", layer12_q)
         layer12_k_even = layer12_k[..., 0::2]
         layer12_k_odd = layer12_k[..., 1::2]
         layer12_k = torch.stack([layer12_k_even * layer12_freqs_cos - layer12_k_odd * layer12_freqs_sin, layer12_k_even * layer12_freqs_sin + layer12_k_odd * layer12_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer12_k", layer12_k)
         layer12_q = layer12_q.transpose(1, 2)
         layer12_k = layer12_k.transpose(1, 2)
         layer12_v = layer12_v.transpose(1, 2)
-        layer12_scores = torch.matmul(layer12_q.float(), layer12_k.float().transpose(-2, -1)) * self.attention_scale
-        layer12_probs = torch.softmax(layer12_scores, dim=-1).to(layer12_v.dtype)
+        layer12_scores = torch.matmul(layer12_q, layer12_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer12_scores", layer12_scores)
+        layer12_probs = torch.softmax(layer12_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer12_probs", layer12_probs)
         layer12_attn = torch.matmul(layer12_probs, layer12_v)
         layer12_attn = layer12_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer12_attn = torch.matmul(layer12_attn, self.layer12_attention_to_out_weight.t())
         layer12_attn = layer12_attn * torch.rsqrt(layer12_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer12_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer12_attn", layer12_attn)
         unified_state = unified_state + layer12_gate_msa * layer12_attn
+        if self.debug_nan:
+            debug_check_finite("layer12_state_after_attn", unified_state)
         layer12_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer12_ffn_norm1_weight
         layer12_ffn_in = layer12_ffn_in * layer12_scale_mlp
         layer12_ffn_a = torch.matmul(layer12_ffn_in, self.layer12_feed_forward_w1_weight.t())
@@ -1488,10 +1850,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer12_ffn = F.silu(layer12_ffn_a) * layer12_ffn_b
         layer12_ffn = torch.matmul(layer12_ffn, self.layer12_feed_forward_w2_weight.t())
         layer12_ffn = layer12_ffn * torch.rsqrt(layer12_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer12_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer12_ffn", layer12_ffn)
         unified_state = unified_state + layer12_gate_mlp * layer12_ffn
+        if self.debug_nan:
+            debug_check_finite("layer12_state_after_ffn", unified_state)
 
         # layer13
         layer13_mod = torch.matmul(adaln_input, self.layer13_adaln_weight.t()) + self.layer13_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer13_mod", layer13_mod)
         layer13_mod = layer13_mod.unsqueeze(1)
         layer13_scale_msa, layer13_gate_msa, layer13_scale_mlp, layer13_gate_mlp = layer13_mod.chunk(4, dim=2)
         layer13_gate_msa = torch.tanh(layer13_gate_msa)
@@ -1508,24 +1876,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer13_v = layer13_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer13_q = layer13_q * torch.rsqrt(layer13_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer13_norm_q_weight.view(1, 1, 1, -1)
         layer13_k = layer13_k * torch.rsqrt(layer13_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer13_norm_k_weight.view(1, 1, 1, -1)
-        layer13_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer13_attn_in.dtype)
-        layer13_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer13_attn_in.dtype)
+        layer13_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer13_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer13_q_even = layer13_q[..., 0::2]
         layer13_q_odd = layer13_q[..., 1::2]
         layer13_q = torch.stack([layer13_q_even * layer13_freqs_cos - layer13_q_odd * layer13_freqs_sin, layer13_q_even * layer13_freqs_sin + layer13_q_odd * layer13_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer13_q", layer13_q)
         layer13_k_even = layer13_k[..., 0::2]
         layer13_k_odd = layer13_k[..., 1::2]
         layer13_k = torch.stack([layer13_k_even * layer13_freqs_cos - layer13_k_odd * layer13_freqs_sin, layer13_k_even * layer13_freqs_sin + layer13_k_odd * layer13_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer13_k", layer13_k)
         layer13_q = layer13_q.transpose(1, 2)
         layer13_k = layer13_k.transpose(1, 2)
         layer13_v = layer13_v.transpose(1, 2)
-        layer13_scores = torch.matmul(layer13_q.float(), layer13_k.float().transpose(-2, -1)) * self.attention_scale
-        layer13_probs = torch.softmax(layer13_scores, dim=-1).to(layer13_v.dtype)
+        layer13_scores = torch.matmul(layer13_q, layer13_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer13_scores", layer13_scores)
+        layer13_probs = torch.softmax(layer13_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer13_probs", layer13_probs)
         layer13_attn = torch.matmul(layer13_probs, layer13_v)
         layer13_attn = layer13_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer13_attn = torch.matmul(layer13_attn, self.layer13_attention_to_out_weight.t())
         layer13_attn = layer13_attn * torch.rsqrt(layer13_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer13_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer13_attn", layer13_attn)
         unified_state = unified_state + layer13_gate_msa * layer13_attn
+        if self.debug_nan:
+            debug_check_finite("layer13_state_after_attn", unified_state)
         layer13_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer13_ffn_norm1_weight
         layer13_ffn_in = layer13_ffn_in * layer13_scale_mlp
         layer13_ffn_a = torch.matmul(layer13_ffn_in, self.layer13_feed_forward_w1_weight.t())
@@ -1533,10 +1913,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer13_ffn = F.silu(layer13_ffn_a) * layer13_ffn_b
         layer13_ffn = torch.matmul(layer13_ffn, self.layer13_feed_forward_w2_weight.t())
         layer13_ffn = layer13_ffn * torch.rsqrt(layer13_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer13_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer13_ffn", layer13_ffn)
         unified_state = unified_state + layer13_gate_mlp * layer13_ffn
+        if self.debug_nan:
+            debug_check_finite("layer13_state_after_ffn", unified_state)
 
         # layer14
         layer14_mod = torch.matmul(adaln_input, self.layer14_adaln_weight.t()) + self.layer14_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer14_mod", layer14_mod)
         layer14_mod = layer14_mod.unsqueeze(1)
         layer14_scale_msa, layer14_gate_msa, layer14_scale_mlp, layer14_gate_mlp = layer14_mod.chunk(4, dim=2)
         layer14_gate_msa = torch.tanh(layer14_gate_msa)
@@ -1553,24 +1939,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer14_v = layer14_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer14_q = layer14_q * torch.rsqrt(layer14_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer14_norm_q_weight.view(1, 1, 1, -1)
         layer14_k = layer14_k * torch.rsqrt(layer14_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer14_norm_k_weight.view(1, 1, 1, -1)
-        layer14_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer14_attn_in.dtype)
-        layer14_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer14_attn_in.dtype)
+        layer14_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer14_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer14_q_even = layer14_q[..., 0::2]
         layer14_q_odd = layer14_q[..., 1::2]
         layer14_q = torch.stack([layer14_q_even * layer14_freqs_cos - layer14_q_odd * layer14_freqs_sin, layer14_q_even * layer14_freqs_sin + layer14_q_odd * layer14_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer14_q", layer14_q)
         layer14_k_even = layer14_k[..., 0::2]
         layer14_k_odd = layer14_k[..., 1::2]
         layer14_k = torch.stack([layer14_k_even * layer14_freqs_cos - layer14_k_odd * layer14_freqs_sin, layer14_k_even * layer14_freqs_sin + layer14_k_odd * layer14_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer14_k", layer14_k)
         layer14_q = layer14_q.transpose(1, 2)
         layer14_k = layer14_k.transpose(1, 2)
         layer14_v = layer14_v.transpose(1, 2)
-        layer14_scores = torch.matmul(layer14_q.float(), layer14_k.float().transpose(-2, -1)) * self.attention_scale
-        layer14_probs = torch.softmax(layer14_scores, dim=-1).to(layer14_v.dtype)
+        layer14_scores = torch.matmul(layer14_q, layer14_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer14_scores", layer14_scores)
+        layer14_probs = torch.softmax(layer14_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer14_probs", layer14_probs)
         layer14_attn = torch.matmul(layer14_probs, layer14_v)
         layer14_attn = layer14_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer14_attn = torch.matmul(layer14_attn, self.layer14_attention_to_out_weight.t())
         layer14_attn = layer14_attn * torch.rsqrt(layer14_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer14_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer14_attn", layer14_attn)
         unified_state = unified_state + layer14_gate_msa * layer14_attn
+        if self.debug_nan:
+            debug_check_finite("layer14_state_after_attn", unified_state)
         layer14_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer14_ffn_norm1_weight
         layer14_ffn_in = layer14_ffn_in * layer14_scale_mlp
         layer14_ffn_a = torch.matmul(layer14_ffn_in, self.layer14_feed_forward_w1_weight.t())
@@ -1578,10 +1976,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer14_ffn = F.silu(layer14_ffn_a) * layer14_ffn_b
         layer14_ffn = torch.matmul(layer14_ffn, self.layer14_feed_forward_w2_weight.t())
         layer14_ffn = layer14_ffn * torch.rsqrt(layer14_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer14_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer14_ffn", layer14_ffn)
         unified_state = unified_state + layer14_gate_mlp * layer14_ffn
+        if self.debug_nan:
+            debug_check_finite("layer14_state_after_ffn", unified_state)
 
         # layer15
         layer15_mod = torch.matmul(adaln_input, self.layer15_adaln_weight.t()) + self.layer15_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer15_mod", layer15_mod)
         layer15_mod = layer15_mod.unsqueeze(1)
         layer15_scale_msa, layer15_gate_msa, layer15_scale_mlp, layer15_gate_mlp = layer15_mod.chunk(4, dim=2)
         layer15_gate_msa = torch.tanh(layer15_gate_msa)
@@ -1598,24 +2002,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer15_v = layer15_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer15_q = layer15_q * torch.rsqrt(layer15_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer15_norm_q_weight.view(1, 1, 1, -1)
         layer15_k = layer15_k * torch.rsqrt(layer15_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer15_norm_k_weight.view(1, 1, 1, -1)
-        layer15_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer15_attn_in.dtype)
-        layer15_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer15_attn_in.dtype)
+        layer15_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer15_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer15_q_even = layer15_q[..., 0::2]
         layer15_q_odd = layer15_q[..., 1::2]
         layer15_q = torch.stack([layer15_q_even * layer15_freqs_cos - layer15_q_odd * layer15_freqs_sin, layer15_q_even * layer15_freqs_sin + layer15_q_odd * layer15_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer15_q", layer15_q)
         layer15_k_even = layer15_k[..., 0::2]
         layer15_k_odd = layer15_k[..., 1::2]
         layer15_k = torch.stack([layer15_k_even * layer15_freqs_cos - layer15_k_odd * layer15_freqs_sin, layer15_k_even * layer15_freqs_sin + layer15_k_odd * layer15_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer15_k", layer15_k)
         layer15_q = layer15_q.transpose(1, 2)
         layer15_k = layer15_k.transpose(1, 2)
         layer15_v = layer15_v.transpose(1, 2)
-        layer15_scores = torch.matmul(layer15_q.float(), layer15_k.float().transpose(-2, -1)) * self.attention_scale
-        layer15_probs = torch.softmax(layer15_scores, dim=-1).to(layer15_v.dtype)
+        layer15_scores = torch.matmul(layer15_q, layer15_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer15_scores", layer15_scores)
+        layer15_probs = torch.softmax(layer15_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer15_probs", layer15_probs)
         layer15_attn = torch.matmul(layer15_probs, layer15_v)
         layer15_attn = layer15_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer15_attn = torch.matmul(layer15_attn, self.layer15_attention_to_out_weight.t())
         layer15_attn = layer15_attn * torch.rsqrt(layer15_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer15_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer15_attn", layer15_attn)
         unified_state = unified_state + layer15_gate_msa * layer15_attn
+        if self.debug_nan:
+            debug_check_finite("layer15_state_after_attn", unified_state)
         layer15_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer15_ffn_norm1_weight
         layer15_ffn_in = layer15_ffn_in * layer15_scale_mlp
         layer15_ffn_a = torch.matmul(layer15_ffn_in, self.layer15_feed_forward_w1_weight.t())
@@ -1623,10 +2039,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer15_ffn = F.silu(layer15_ffn_a) * layer15_ffn_b
         layer15_ffn = torch.matmul(layer15_ffn, self.layer15_feed_forward_w2_weight.t())
         layer15_ffn = layer15_ffn * torch.rsqrt(layer15_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer15_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer15_ffn", layer15_ffn)
         unified_state = unified_state + layer15_gate_mlp * layer15_ffn
+        if self.debug_nan:
+            debug_check_finite("layer15_state_after_ffn", unified_state)
 
         # layer16
         layer16_mod = torch.matmul(adaln_input, self.layer16_adaln_weight.t()) + self.layer16_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer16_mod", layer16_mod)
         layer16_mod = layer16_mod.unsqueeze(1)
         layer16_scale_msa, layer16_gate_msa, layer16_scale_mlp, layer16_gate_mlp = layer16_mod.chunk(4, dim=2)
         layer16_gate_msa = torch.tanh(layer16_gate_msa)
@@ -1643,24 +2065,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer16_v = layer16_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer16_q = layer16_q * torch.rsqrt(layer16_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer16_norm_q_weight.view(1, 1, 1, -1)
         layer16_k = layer16_k * torch.rsqrt(layer16_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer16_norm_k_weight.view(1, 1, 1, -1)
-        layer16_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer16_attn_in.dtype)
-        layer16_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer16_attn_in.dtype)
+        layer16_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer16_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer16_q_even = layer16_q[..., 0::2]
         layer16_q_odd = layer16_q[..., 1::2]
         layer16_q = torch.stack([layer16_q_even * layer16_freqs_cos - layer16_q_odd * layer16_freqs_sin, layer16_q_even * layer16_freqs_sin + layer16_q_odd * layer16_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer16_q", layer16_q)
         layer16_k_even = layer16_k[..., 0::2]
         layer16_k_odd = layer16_k[..., 1::2]
         layer16_k = torch.stack([layer16_k_even * layer16_freqs_cos - layer16_k_odd * layer16_freqs_sin, layer16_k_even * layer16_freqs_sin + layer16_k_odd * layer16_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer16_k", layer16_k)
         layer16_q = layer16_q.transpose(1, 2)
         layer16_k = layer16_k.transpose(1, 2)
         layer16_v = layer16_v.transpose(1, 2)
-        layer16_scores = torch.matmul(layer16_q.float(), layer16_k.float().transpose(-2, -1)) * self.attention_scale
-        layer16_probs = torch.softmax(layer16_scores, dim=-1).to(layer16_v.dtype)
+        layer16_scores = torch.matmul(layer16_q, layer16_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer16_scores", layer16_scores)
+        layer16_probs = torch.softmax(layer16_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer16_probs", layer16_probs)
         layer16_attn = torch.matmul(layer16_probs, layer16_v)
         layer16_attn = layer16_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer16_attn = torch.matmul(layer16_attn, self.layer16_attention_to_out_weight.t())
         layer16_attn = layer16_attn * torch.rsqrt(layer16_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer16_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer16_attn", layer16_attn)
         unified_state = unified_state + layer16_gate_msa * layer16_attn
+        if self.debug_nan:
+            debug_check_finite("layer16_state_after_attn", unified_state)
         layer16_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer16_ffn_norm1_weight
         layer16_ffn_in = layer16_ffn_in * layer16_scale_mlp
         layer16_ffn_a = torch.matmul(layer16_ffn_in, self.layer16_feed_forward_w1_weight.t())
@@ -1668,10 +2102,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer16_ffn = F.silu(layer16_ffn_a) * layer16_ffn_b
         layer16_ffn = torch.matmul(layer16_ffn, self.layer16_feed_forward_w2_weight.t())
         layer16_ffn = layer16_ffn * torch.rsqrt(layer16_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer16_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer16_ffn", layer16_ffn)
         unified_state = unified_state + layer16_gate_mlp * layer16_ffn
+        if self.debug_nan:
+            debug_check_finite("layer16_state_after_ffn", unified_state)
 
         # layer17
         layer17_mod = torch.matmul(adaln_input, self.layer17_adaln_weight.t()) + self.layer17_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer17_mod", layer17_mod)
         layer17_mod = layer17_mod.unsqueeze(1)
         layer17_scale_msa, layer17_gate_msa, layer17_scale_mlp, layer17_gate_mlp = layer17_mod.chunk(4, dim=2)
         layer17_gate_msa = torch.tanh(layer17_gate_msa)
@@ -1688,24 +2128,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer17_v = layer17_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer17_q = layer17_q * torch.rsqrt(layer17_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer17_norm_q_weight.view(1, 1, 1, -1)
         layer17_k = layer17_k * torch.rsqrt(layer17_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer17_norm_k_weight.view(1, 1, 1, -1)
-        layer17_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer17_attn_in.dtype)
-        layer17_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer17_attn_in.dtype)
+        layer17_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer17_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer17_q_even = layer17_q[..., 0::2]
         layer17_q_odd = layer17_q[..., 1::2]
         layer17_q = torch.stack([layer17_q_even * layer17_freqs_cos - layer17_q_odd * layer17_freqs_sin, layer17_q_even * layer17_freqs_sin + layer17_q_odd * layer17_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer17_q", layer17_q)
         layer17_k_even = layer17_k[..., 0::2]
         layer17_k_odd = layer17_k[..., 1::2]
         layer17_k = torch.stack([layer17_k_even * layer17_freqs_cos - layer17_k_odd * layer17_freqs_sin, layer17_k_even * layer17_freqs_sin + layer17_k_odd * layer17_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer17_k", layer17_k)
         layer17_q = layer17_q.transpose(1, 2)
         layer17_k = layer17_k.transpose(1, 2)
         layer17_v = layer17_v.transpose(1, 2)
-        layer17_scores = torch.matmul(layer17_q.float(), layer17_k.float().transpose(-2, -1)) * self.attention_scale
-        layer17_probs = torch.softmax(layer17_scores, dim=-1).to(layer17_v.dtype)
+        layer17_scores = torch.matmul(layer17_q, layer17_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer17_scores", layer17_scores)
+        layer17_probs = torch.softmax(layer17_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer17_probs", layer17_probs)
         layer17_attn = torch.matmul(layer17_probs, layer17_v)
         layer17_attn = layer17_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer17_attn = torch.matmul(layer17_attn, self.layer17_attention_to_out_weight.t())
         layer17_attn = layer17_attn * torch.rsqrt(layer17_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer17_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer17_attn", layer17_attn)
         unified_state = unified_state + layer17_gate_msa * layer17_attn
+        if self.debug_nan:
+            debug_check_finite("layer17_state_after_attn", unified_state)
         layer17_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer17_ffn_norm1_weight
         layer17_ffn_in = layer17_ffn_in * layer17_scale_mlp
         layer17_ffn_a = torch.matmul(layer17_ffn_in, self.layer17_feed_forward_w1_weight.t())
@@ -1713,10 +2165,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer17_ffn = F.silu(layer17_ffn_a) * layer17_ffn_b
         layer17_ffn = torch.matmul(layer17_ffn, self.layer17_feed_forward_w2_weight.t())
         layer17_ffn = layer17_ffn * torch.rsqrt(layer17_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer17_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer17_ffn", layer17_ffn)
         unified_state = unified_state + layer17_gate_mlp * layer17_ffn
+        if self.debug_nan:
+            debug_check_finite("layer17_state_after_ffn", unified_state)
 
         # layer18
         layer18_mod = torch.matmul(adaln_input, self.layer18_adaln_weight.t()) + self.layer18_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer18_mod", layer18_mod)
         layer18_mod = layer18_mod.unsqueeze(1)
         layer18_scale_msa, layer18_gate_msa, layer18_scale_mlp, layer18_gate_mlp = layer18_mod.chunk(4, dim=2)
         layer18_gate_msa = torch.tanh(layer18_gate_msa)
@@ -1733,24 +2191,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer18_v = layer18_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer18_q = layer18_q * torch.rsqrt(layer18_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer18_norm_q_weight.view(1, 1, 1, -1)
         layer18_k = layer18_k * torch.rsqrt(layer18_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer18_norm_k_weight.view(1, 1, 1, -1)
-        layer18_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer18_attn_in.dtype)
-        layer18_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer18_attn_in.dtype)
+        layer18_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer18_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer18_q_even = layer18_q[..., 0::2]
         layer18_q_odd = layer18_q[..., 1::2]
         layer18_q = torch.stack([layer18_q_even * layer18_freqs_cos - layer18_q_odd * layer18_freqs_sin, layer18_q_even * layer18_freqs_sin + layer18_q_odd * layer18_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer18_q", layer18_q)
         layer18_k_even = layer18_k[..., 0::2]
         layer18_k_odd = layer18_k[..., 1::2]
         layer18_k = torch.stack([layer18_k_even * layer18_freqs_cos - layer18_k_odd * layer18_freqs_sin, layer18_k_even * layer18_freqs_sin + layer18_k_odd * layer18_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer18_k", layer18_k)
         layer18_q = layer18_q.transpose(1, 2)
         layer18_k = layer18_k.transpose(1, 2)
         layer18_v = layer18_v.transpose(1, 2)
-        layer18_scores = torch.matmul(layer18_q.float(), layer18_k.float().transpose(-2, -1)) * self.attention_scale
-        layer18_probs = torch.softmax(layer18_scores, dim=-1).to(layer18_v.dtype)
+        layer18_scores = torch.matmul(layer18_q, layer18_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer18_scores", layer18_scores)
+        layer18_probs = torch.softmax(layer18_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer18_probs", layer18_probs)
         layer18_attn = torch.matmul(layer18_probs, layer18_v)
         layer18_attn = layer18_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer18_attn = torch.matmul(layer18_attn, self.layer18_attention_to_out_weight.t())
         layer18_attn = layer18_attn * torch.rsqrt(layer18_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer18_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer18_attn", layer18_attn)
         unified_state = unified_state + layer18_gate_msa * layer18_attn
+        if self.debug_nan:
+            debug_check_finite("layer18_state_after_attn", unified_state)
         layer18_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer18_ffn_norm1_weight
         layer18_ffn_in = layer18_ffn_in * layer18_scale_mlp
         layer18_ffn_a = torch.matmul(layer18_ffn_in, self.layer18_feed_forward_w1_weight.t())
@@ -1758,10 +2228,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer18_ffn = F.silu(layer18_ffn_a) * layer18_ffn_b
         layer18_ffn = torch.matmul(layer18_ffn, self.layer18_feed_forward_w2_weight.t())
         layer18_ffn = layer18_ffn * torch.rsqrt(layer18_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer18_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer18_ffn", layer18_ffn)
         unified_state = unified_state + layer18_gate_mlp * layer18_ffn
+        if self.debug_nan:
+            debug_check_finite("layer18_state_after_ffn", unified_state)
 
         # layer19
         layer19_mod = torch.matmul(adaln_input, self.layer19_adaln_weight.t()) + self.layer19_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer19_mod", layer19_mod)
         layer19_mod = layer19_mod.unsqueeze(1)
         layer19_scale_msa, layer19_gate_msa, layer19_scale_mlp, layer19_gate_mlp = layer19_mod.chunk(4, dim=2)
         layer19_gate_msa = torch.tanh(layer19_gate_msa)
@@ -1778,24 +2254,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer19_v = layer19_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer19_q = layer19_q * torch.rsqrt(layer19_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer19_norm_q_weight.view(1, 1, 1, -1)
         layer19_k = layer19_k * torch.rsqrt(layer19_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer19_norm_k_weight.view(1, 1, 1, -1)
-        layer19_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer19_attn_in.dtype)
-        layer19_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer19_attn_in.dtype)
+        layer19_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer19_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer19_q_even = layer19_q[..., 0::2]
         layer19_q_odd = layer19_q[..., 1::2]
         layer19_q = torch.stack([layer19_q_even * layer19_freqs_cos - layer19_q_odd * layer19_freqs_sin, layer19_q_even * layer19_freqs_sin + layer19_q_odd * layer19_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer19_q", layer19_q)
         layer19_k_even = layer19_k[..., 0::2]
         layer19_k_odd = layer19_k[..., 1::2]
         layer19_k = torch.stack([layer19_k_even * layer19_freqs_cos - layer19_k_odd * layer19_freqs_sin, layer19_k_even * layer19_freqs_sin + layer19_k_odd * layer19_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer19_k", layer19_k)
         layer19_q = layer19_q.transpose(1, 2)
         layer19_k = layer19_k.transpose(1, 2)
         layer19_v = layer19_v.transpose(1, 2)
-        layer19_scores = torch.matmul(layer19_q.float(), layer19_k.float().transpose(-2, -1)) * self.attention_scale
-        layer19_probs = torch.softmax(layer19_scores, dim=-1).to(layer19_v.dtype)
+        layer19_scores = torch.matmul(layer19_q, layer19_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer19_scores", layer19_scores)
+        layer19_probs = torch.softmax(layer19_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer19_probs", layer19_probs)
         layer19_attn = torch.matmul(layer19_probs, layer19_v)
         layer19_attn = layer19_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer19_attn = torch.matmul(layer19_attn, self.layer19_attention_to_out_weight.t())
         layer19_attn = layer19_attn * torch.rsqrt(layer19_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer19_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer19_attn", layer19_attn)
         unified_state = unified_state + layer19_gate_msa * layer19_attn
+        if self.debug_nan:
+            debug_check_finite("layer19_state_after_attn", unified_state)
         layer19_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer19_ffn_norm1_weight
         layer19_ffn_in = layer19_ffn_in * layer19_scale_mlp
         layer19_ffn_a = torch.matmul(layer19_ffn_in, self.layer19_feed_forward_w1_weight.t())
@@ -1803,10 +2291,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer19_ffn = F.silu(layer19_ffn_a) * layer19_ffn_b
         layer19_ffn = torch.matmul(layer19_ffn, self.layer19_feed_forward_w2_weight.t())
         layer19_ffn = layer19_ffn * torch.rsqrt(layer19_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer19_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer19_ffn", layer19_ffn)
         unified_state = unified_state + layer19_gate_mlp * layer19_ffn
+        if self.debug_nan:
+            debug_check_finite("layer19_state_after_ffn", unified_state)
 
         # layer20
         layer20_mod = torch.matmul(adaln_input, self.layer20_adaln_weight.t()) + self.layer20_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer20_mod", layer20_mod)
         layer20_mod = layer20_mod.unsqueeze(1)
         layer20_scale_msa, layer20_gate_msa, layer20_scale_mlp, layer20_gate_mlp = layer20_mod.chunk(4, dim=2)
         layer20_gate_msa = torch.tanh(layer20_gate_msa)
@@ -1823,24 +2317,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer20_v = layer20_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer20_q = layer20_q * torch.rsqrt(layer20_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer20_norm_q_weight.view(1, 1, 1, -1)
         layer20_k = layer20_k * torch.rsqrt(layer20_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer20_norm_k_weight.view(1, 1, 1, -1)
-        layer20_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer20_attn_in.dtype)
-        layer20_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer20_attn_in.dtype)
+        layer20_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer20_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer20_q_even = layer20_q[..., 0::2]
         layer20_q_odd = layer20_q[..., 1::2]
         layer20_q = torch.stack([layer20_q_even * layer20_freqs_cos - layer20_q_odd * layer20_freqs_sin, layer20_q_even * layer20_freqs_sin + layer20_q_odd * layer20_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer20_q", layer20_q)
         layer20_k_even = layer20_k[..., 0::2]
         layer20_k_odd = layer20_k[..., 1::2]
         layer20_k = torch.stack([layer20_k_even * layer20_freqs_cos - layer20_k_odd * layer20_freqs_sin, layer20_k_even * layer20_freqs_sin + layer20_k_odd * layer20_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer20_k", layer20_k)
         layer20_q = layer20_q.transpose(1, 2)
         layer20_k = layer20_k.transpose(1, 2)
         layer20_v = layer20_v.transpose(1, 2)
-        layer20_scores = torch.matmul(layer20_q.float(), layer20_k.float().transpose(-2, -1)) * self.attention_scale
-        layer20_probs = torch.softmax(layer20_scores, dim=-1).to(layer20_v.dtype)
+        layer20_scores = torch.matmul(layer20_q, layer20_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer20_scores", layer20_scores)
+        layer20_probs = torch.softmax(layer20_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer20_probs", layer20_probs)
         layer20_attn = torch.matmul(layer20_probs, layer20_v)
         layer20_attn = layer20_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer20_attn = torch.matmul(layer20_attn, self.layer20_attention_to_out_weight.t())
         layer20_attn = layer20_attn * torch.rsqrt(layer20_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer20_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer20_attn", layer20_attn)
         unified_state = unified_state + layer20_gate_msa * layer20_attn
+        if self.debug_nan:
+            debug_check_finite("layer20_state_after_attn", unified_state)
         layer20_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer20_ffn_norm1_weight
         layer20_ffn_in = layer20_ffn_in * layer20_scale_mlp
         layer20_ffn_a = torch.matmul(layer20_ffn_in, self.layer20_feed_forward_w1_weight.t())
@@ -1848,10 +2354,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer20_ffn = F.silu(layer20_ffn_a) * layer20_ffn_b
         layer20_ffn = torch.matmul(layer20_ffn, self.layer20_feed_forward_w2_weight.t())
         layer20_ffn = layer20_ffn * torch.rsqrt(layer20_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer20_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer20_ffn", layer20_ffn)
         unified_state = unified_state + layer20_gate_mlp * layer20_ffn
+        if self.debug_nan:
+            debug_check_finite("layer20_state_after_ffn", unified_state)
 
         # layer21
         layer21_mod = torch.matmul(adaln_input, self.layer21_adaln_weight.t()) + self.layer21_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer21_mod", layer21_mod)
         layer21_mod = layer21_mod.unsqueeze(1)
         layer21_scale_msa, layer21_gate_msa, layer21_scale_mlp, layer21_gate_mlp = layer21_mod.chunk(4, dim=2)
         layer21_gate_msa = torch.tanh(layer21_gate_msa)
@@ -1868,24 +2380,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer21_v = layer21_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer21_q = layer21_q * torch.rsqrt(layer21_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer21_norm_q_weight.view(1, 1, 1, -1)
         layer21_k = layer21_k * torch.rsqrt(layer21_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer21_norm_k_weight.view(1, 1, 1, -1)
-        layer21_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer21_attn_in.dtype)
-        layer21_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer21_attn_in.dtype)
+        layer21_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer21_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer21_q_even = layer21_q[..., 0::2]
         layer21_q_odd = layer21_q[..., 1::2]
         layer21_q = torch.stack([layer21_q_even * layer21_freqs_cos - layer21_q_odd * layer21_freqs_sin, layer21_q_even * layer21_freqs_sin + layer21_q_odd * layer21_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer21_q", layer21_q)
         layer21_k_even = layer21_k[..., 0::2]
         layer21_k_odd = layer21_k[..., 1::2]
         layer21_k = torch.stack([layer21_k_even * layer21_freqs_cos - layer21_k_odd * layer21_freqs_sin, layer21_k_even * layer21_freqs_sin + layer21_k_odd * layer21_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer21_k", layer21_k)
         layer21_q = layer21_q.transpose(1, 2)
         layer21_k = layer21_k.transpose(1, 2)
         layer21_v = layer21_v.transpose(1, 2)
-        layer21_scores = torch.matmul(layer21_q.float(), layer21_k.float().transpose(-2, -1)) * self.attention_scale
-        layer21_probs = torch.softmax(layer21_scores, dim=-1).to(layer21_v.dtype)
+        layer21_scores = torch.matmul(layer21_q, layer21_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer21_scores", layer21_scores)
+        layer21_probs = torch.softmax(layer21_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer21_probs", layer21_probs)
         layer21_attn = torch.matmul(layer21_probs, layer21_v)
         layer21_attn = layer21_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer21_attn = torch.matmul(layer21_attn, self.layer21_attention_to_out_weight.t())
         layer21_attn = layer21_attn * torch.rsqrt(layer21_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer21_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer21_attn", layer21_attn)
         unified_state = unified_state + layer21_gate_msa * layer21_attn
+        if self.debug_nan:
+            debug_check_finite("layer21_state_after_attn", unified_state)
         layer21_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer21_ffn_norm1_weight
         layer21_ffn_in = layer21_ffn_in * layer21_scale_mlp
         layer21_ffn_a = torch.matmul(layer21_ffn_in, self.layer21_feed_forward_w1_weight.t())
@@ -1893,10 +2417,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer21_ffn = F.silu(layer21_ffn_a) * layer21_ffn_b
         layer21_ffn = torch.matmul(layer21_ffn, self.layer21_feed_forward_w2_weight.t())
         layer21_ffn = layer21_ffn * torch.rsqrt(layer21_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer21_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer21_ffn", layer21_ffn)
         unified_state = unified_state + layer21_gate_mlp * layer21_ffn
+        if self.debug_nan:
+            debug_check_finite("layer21_state_after_ffn", unified_state)
 
         # layer22
         layer22_mod = torch.matmul(adaln_input, self.layer22_adaln_weight.t()) + self.layer22_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer22_mod", layer22_mod)
         layer22_mod = layer22_mod.unsqueeze(1)
         layer22_scale_msa, layer22_gate_msa, layer22_scale_mlp, layer22_gate_mlp = layer22_mod.chunk(4, dim=2)
         layer22_gate_msa = torch.tanh(layer22_gate_msa)
@@ -1913,24 +2443,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer22_v = layer22_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer22_q = layer22_q * torch.rsqrt(layer22_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer22_norm_q_weight.view(1, 1, 1, -1)
         layer22_k = layer22_k * torch.rsqrt(layer22_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer22_norm_k_weight.view(1, 1, 1, -1)
-        layer22_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer22_attn_in.dtype)
-        layer22_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer22_attn_in.dtype)
+        layer22_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer22_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer22_q_even = layer22_q[..., 0::2]
         layer22_q_odd = layer22_q[..., 1::2]
         layer22_q = torch.stack([layer22_q_even * layer22_freqs_cos - layer22_q_odd * layer22_freqs_sin, layer22_q_even * layer22_freqs_sin + layer22_q_odd * layer22_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer22_q", layer22_q)
         layer22_k_even = layer22_k[..., 0::2]
         layer22_k_odd = layer22_k[..., 1::2]
         layer22_k = torch.stack([layer22_k_even * layer22_freqs_cos - layer22_k_odd * layer22_freqs_sin, layer22_k_even * layer22_freqs_sin + layer22_k_odd * layer22_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer22_k", layer22_k)
         layer22_q = layer22_q.transpose(1, 2)
         layer22_k = layer22_k.transpose(1, 2)
         layer22_v = layer22_v.transpose(1, 2)
-        layer22_scores = torch.matmul(layer22_q.float(), layer22_k.float().transpose(-2, -1)) * self.attention_scale
-        layer22_probs = torch.softmax(layer22_scores, dim=-1).to(layer22_v.dtype)
+        layer22_scores = torch.matmul(layer22_q, layer22_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer22_scores", layer22_scores)
+        layer22_probs = torch.softmax(layer22_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer22_probs", layer22_probs)
         layer22_attn = torch.matmul(layer22_probs, layer22_v)
         layer22_attn = layer22_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer22_attn = torch.matmul(layer22_attn, self.layer22_attention_to_out_weight.t())
         layer22_attn = layer22_attn * torch.rsqrt(layer22_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer22_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer22_attn", layer22_attn)
         unified_state = unified_state + layer22_gate_msa * layer22_attn
+        if self.debug_nan:
+            debug_check_finite("layer22_state_after_attn", unified_state)
         layer22_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer22_ffn_norm1_weight
         layer22_ffn_in = layer22_ffn_in * layer22_scale_mlp
         layer22_ffn_a = torch.matmul(layer22_ffn_in, self.layer22_feed_forward_w1_weight.t())
@@ -1938,10 +2480,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer22_ffn = F.silu(layer22_ffn_a) * layer22_ffn_b
         layer22_ffn = torch.matmul(layer22_ffn, self.layer22_feed_forward_w2_weight.t())
         layer22_ffn = layer22_ffn * torch.rsqrt(layer22_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer22_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer22_ffn", layer22_ffn)
         unified_state = unified_state + layer22_gate_mlp * layer22_ffn
+        if self.debug_nan:
+            debug_check_finite("layer22_state_after_ffn", unified_state)
 
         # layer23
         layer23_mod = torch.matmul(adaln_input, self.layer23_adaln_weight.t()) + self.layer23_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer23_mod", layer23_mod)
         layer23_mod = layer23_mod.unsqueeze(1)
         layer23_scale_msa, layer23_gate_msa, layer23_scale_mlp, layer23_gate_mlp = layer23_mod.chunk(4, dim=2)
         layer23_gate_msa = torch.tanh(layer23_gate_msa)
@@ -1958,24 +2506,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer23_v = layer23_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer23_q = layer23_q * torch.rsqrt(layer23_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer23_norm_q_weight.view(1, 1, 1, -1)
         layer23_k = layer23_k * torch.rsqrt(layer23_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer23_norm_k_weight.view(1, 1, 1, -1)
-        layer23_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer23_attn_in.dtype)
-        layer23_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer23_attn_in.dtype)
+        layer23_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer23_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer23_q_even = layer23_q[..., 0::2]
         layer23_q_odd = layer23_q[..., 1::2]
         layer23_q = torch.stack([layer23_q_even * layer23_freqs_cos - layer23_q_odd * layer23_freqs_sin, layer23_q_even * layer23_freqs_sin + layer23_q_odd * layer23_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer23_q", layer23_q)
         layer23_k_even = layer23_k[..., 0::2]
         layer23_k_odd = layer23_k[..., 1::2]
         layer23_k = torch.stack([layer23_k_even * layer23_freqs_cos - layer23_k_odd * layer23_freqs_sin, layer23_k_even * layer23_freqs_sin + layer23_k_odd * layer23_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer23_k", layer23_k)
         layer23_q = layer23_q.transpose(1, 2)
         layer23_k = layer23_k.transpose(1, 2)
         layer23_v = layer23_v.transpose(1, 2)
-        layer23_scores = torch.matmul(layer23_q.float(), layer23_k.float().transpose(-2, -1)) * self.attention_scale
-        layer23_probs = torch.softmax(layer23_scores, dim=-1).to(layer23_v.dtype)
+        layer23_scores = torch.matmul(layer23_q, layer23_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer23_scores", layer23_scores)
+        layer23_probs = torch.softmax(layer23_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer23_probs", layer23_probs)
         layer23_attn = torch.matmul(layer23_probs, layer23_v)
         layer23_attn = layer23_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer23_attn = torch.matmul(layer23_attn, self.layer23_attention_to_out_weight.t())
         layer23_attn = layer23_attn * torch.rsqrt(layer23_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer23_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer23_attn", layer23_attn)
         unified_state = unified_state + layer23_gate_msa * layer23_attn
+        if self.debug_nan:
+            debug_check_finite("layer23_state_after_attn", unified_state)
         layer23_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer23_ffn_norm1_weight
         layer23_ffn_in = layer23_ffn_in * layer23_scale_mlp
         layer23_ffn_a = torch.matmul(layer23_ffn_in, self.layer23_feed_forward_w1_weight.t())
@@ -1983,10 +2543,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer23_ffn = F.silu(layer23_ffn_a) * layer23_ffn_b
         layer23_ffn = torch.matmul(layer23_ffn, self.layer23_feed_forward_w2_weight.t())
         layer23_ffn = layer23_ffn * torch.rsqrt(layer23_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer23_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer23_ffn", layer23_ffn)
         unified_state = unified_state + layer23_gate_mlp * layer23_ffn
+        if self.debug_nan:
+            debug_check_finite("layer23_state_after_ffn", unified_state)
 
         # layer24
         layer24_mod = torch.matmul(adaln_input, self.layer24_adaln_weight.t()) + self.layer24_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer24_mod", layer24_mod)
         layer24_mod = layer24_mod.unsqueeze(1)
         layer24_scale_msa, layer24_gate_msa, layer24_scale_mlp, layer24_gate_mlp = layer24_mod.chunk(4, dim=2)
         layer24_gate_msa = torch.tanh(layer24_gate_msa)
@@ -2003,24 +2569,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer24_v = layer24_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer24_q = layer24_q * torch.rsqrt(layer24_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer24_norm_q_weight.view(1, 1, 1, -1)
         layer24_k = layer24_k * torch.rsqrt(layer24_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer24_norm_k_weight.view(1, 1, 1, -1)
-        layer24_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer24_attn_in.dtype)
-        layer24_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer24_attn_in.dtype)
+        layer24_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer24_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer24_q_even = layer24_q[..., 0::2]
         layer24_q_odd = layer24_q[..., 1::2]
         layer24_q = torch.stack([layer24_q_even * layer24_freqs_cos - layer24_q_odd * layer24_freqs_sin, layer24_q_even * layer24_freqs_sin + layer24_q_odd * layer24_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer24_q", layer24_q)
         layer24_k_even = layer24_k[..., 0::2]
         layer24_k_odd = layer24_k[..., 1::2]
         layer24_k = torch.stack([layer24_k_even * layer24_freqs_cos - layer24_k_odd * layer24_freqs_sin, layer24_k_even * layer24_freqs_sin + layer24_k_odd * layer24_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer24_k", layer24_k)
         layer24_q = layer24_q.transpose(1, 2)
         layer24_k = layer24_k.transpose(1, 2)
         layer24_v = layer24_v.transpose(1, 2)
-        layer24_scores = torch.matmul(layer24_q.float(), layer24_k.float().transpose(-2, -1)) * self.attention_scale
-        layer24_probs = torch.softmax(layer24_scores, dim=-1).to(layer24_v.dtype)
+        layer24_scores = torch.matmul(layer24_q, layer24_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer24_scores", layer24_scores)
+        layer24_probs = torch.softmax(layer24_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer24_probs", layer24_probs)
         layer24_attn = torch.matmul(layer24_probs, layer24_v)
         layer24_attn = layer24_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer24_attn = torch.matmul(layer24_attn, self.layer24_attention_to_out_weight.t())
         layer24_attn = layer24_attn * torch.rsqrt(layer24_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer24_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer24_attn", layer24_attn)
         unified_state = unified_state + layer24_gate_msa * layer24_attn
+        if self.debug_nan:
+            debug_check_finite("layer24_state_after_attn", unified_state)
         layer24_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer24_ffn_norm1_weight
         layer24_ffn_in = layer24_ffn_in * layer24_scale_mlp
         layer24_ffn_a = torch.matmul(layer24_ffn_in, self.layer24_feed_forward_w1_weight.t())
@@ -2028,10 +2606,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer24_ffn = F.silu(layer24_ffn_a) * layer24_ffn_b
         layer24_ffn = torch.matmul(layer24_ffn, self.layer24_feed_forward_w2_weight.t())
         layer24_ffn = layer24_ffn * torch.rsqrt(layer24_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer24_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer24_ffn", layer24_ffn)
         unified_state = unified_state + layer24_gate_mlp * layer24_ffn
+        if self.debug_nan:
+            debug_check_finite("layer24_state_after_ffn", unified_state)
 
         # layer25
         layer25_mod = torch.matmul(adaln_input, self.layer25_adaln_weight.t()) + self.layer25_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer25_mod", layer25_mod)
         layer25_mod = layer25_mod.unsqueeze(1)
         layer25_scale_msa, layer25_gate_msa, layer25_scale_mlp, layer25_gate_mlp = layer25_mod.chunk(4, dim=2)
         layer25_gate_msa = torch.tanh(layer25_gate_msa)
@@ -2048,24 +2632,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer25_v = layer25_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer25_q = layer25_q * torch.rsqrt(layer25_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer25_norm_q_weight.view(1, 1, 1, -1)
         layer25_k = layer25_k * torch.rsqrt(layer25_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer25_norm_k_weight.view(1, 1, 1, -1)
-        layer25_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer25_attn_in.dtype)
-        layer25_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer25_attn_in.dtype)
+        layer25_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer25_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer25_q_even = layer25_q[..., 0::2]
         layer25_q_odd = layer25_q[..., 1::2]
         layer25_q = torch.stack([layer25_q_even * layer25_freqs_cos - layer25_q_odd * layer25_freqs_sin, layer25_q_even * layer25_freqs_sin + layer25_q_odd * layer25_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer25_q", layer25_q)
         layer25_k_even = layer25_k[..., 0::2]
         layer25_k_odd = layer25_k[..., 1::2]
         layer25_k = torch.stack([layer25_k_even * layer25_freqs_cos - layer25_k_odd * layer25_freqs_sin, layer25_k_even * layer25_freqs_sin + layer25_k_odd * layer25_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer25_k", layer25_k)
         layer25_q = layer25_q.transpose(1, 2)
         layer25_k = layer25_k.transpose(1, 2)
         layer25_v = layer25_v.transpose(1, 2)
-        layer25_scores = torch.matmul(layer25_q.float(), layer25_k.float().transpose(-2, -1)) * self.attention_scale
-        layer25_probs = torch.softmax(layer25_scores, dim=-1).to(layer25_v.dtype)
+        layer25_scores = torch.matmul(layer25_q, layer25_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer25_scores", layer25_scores)
+        layer25_probs = torch.softmax(layer25_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer25_probs", layer25_probs)
         layer25_attn = torch.matmul(layer25_probs, layer25_v)
         layer25_attn = layer25_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer25_attn = torch.matmul(layer25_attn, self.layer25_attention_to_out_weight.t())
         layer25_attn = layer25_attn * torch.rsqrt(layer25_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer25_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer25_attn", layer25_attn)
         unified_state = unified_state + layer25_gate_msa * layer25_attn
+        if self.debug_nan:
+            debug_check_finite("layer25_state_after_attn", unified_state)
         layer25_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer25_ffn_norm1_weight
         layer25_ffn_in = layer25_ffn_in * layer25_scale_mlp
         layer25_ffn_a = torch.matmul(layer25_ffn_in, self.layer25_feed_forward_w1_weight.t())
@@ -2073,10 +2669,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer25_ffn = F.silu(layer25_ffn_a) * layer25_ffn_b
         layer25_ffn = torch.matmul(layer25_ffn, self.layer25_feed_forward_w2_weight.t())
         layer25_ffn = layer25_ffn * torch.rsqrt(layer25_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer25_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer25_ffn", layer25_ffn)
         unified_state = unified_state + layer25_gate_mlp * layer25_ffn
+        if self.debug_nan:
+            debug_check_finite("layer25_state_after_ffn", unified_state)
 
         # layer26
         layer26_mod = torch.matmul(adaln_input, self.layer26_adaln_weight.t()) + self.layer26_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer26_mod", layer26_mod)
         layer26_mod = layer26_mod.unsqueeze(1)
         layer26_scale_msa, layer26_gate_msa, layer26_scale_mlp, layer26_gate_mlp = layer26_mod.chunk(4, dim=2)
         layer26_gate_msa = torch.tanh(layer26_gate_msa)
@@ -2093,24 +2695,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer26_v = layer26_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer26_q = layer26_q * torch.rsqrt(layer26_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer26_norm_q_weight.view(1, 1, 1, -1)
         layer26_k = layer26_k * torch.rsqrt(layer26_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer26_norm_k_weight.view(1, 1, 1, -1)
-        layer26_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer26_attn_in.dtype)
-        layer26_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer26_attn_in.dtype)
+        layer26_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer26_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer26_q_even = layer26_q[..., 0::2]
         layer26_q_odd = layer26_q[..., 1::2]
         layer26_q = torch.stack([layer26_q_even * layer26_freqs_cos - layer26_q_odd * layer26_freqs_sin, layer26_q_even * layer26_freqs_sin + layer26_q_odd * layer26_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer26_q", layer26_q)
         layer26_k_even = layer26_k[..., 0::2]
         layer26_k_odd = layer26_k[..., 1::2]
         layer26_k = torch.stack([layer26_k_even * layer26_freqs_cos - layer26_k_odd * layer26_freqs_sin, layer26_k_even * layer26_freqs_sin + layer26_k_odd * layer26_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer26_k", layer26_k)
         layer26_q = layer26_q.transpose(1, 2)
         layer26_k = layer26_k.transpose(1, 2)
         layer26_v = layer26_v.transpose(1, 2)
-        layer26_scores = torch.matmul(layer26_q.float(), layer26_k.float().transpose(-2, -1)) * self.attention_scale
-        layer26_probs = torch.softmax(layer26_scores, dim=-1).to(layer26_v.dtype)
+        layer26_scores = torch.matmul(layer26_q, layer26_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer26_scores", layer26_scores)
+        layer26_probs = torch.softmax(layer26_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer26_probs", layer26_probs)
         layer26_attn = torch.matmul(layer26_probs, layer26_v)
         layer26_attn = layer26_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer26_attn = torch.matmul(layer26_attn, self.layer26_attention_to_out_weight.t())
         layer26_attn = layer26_attn * torch.rsqrt(layer26_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer26_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer26_attn", layer26_attn)
         unified_state = unified_state + layer26_gate_msa * layer26_attn
+        if self.debug_nan:
+            debug_check_finite("layer26_state_after_attn", unified_state)
         layer26_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer26_ffn_norm1_weight
         layer26_ffn_in = layer26_ffn_in * layer26_scale_mlp
         layer26_ffn_a = torch.matmul(layer26_ffn_in, self.layer26_feed_forward_w1_weight.t())
@@ -2118,10 +2732,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer26_ffn = F.silu(layer26_ffn_a) * layer26_ffn_b
         layer26_ffn = torch.matmul(layer26_ffn, self.layer26_feed_forward_w2_weight.t())
         layer26_ffn = layer26_ffn * torch.rsqrt(layer26_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer26_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer26_ffn", layer26_ffn)
         unified_state = unified_state + layer26_gate_mlp * layer26_ffn
+        if self.debug_nan:
+            debug_check_finite("layer26_state_after_ffn", unified_state)
 
         # layer27
         layer27_mod = torch.matmul(adaln_input, self.layer27_adaln_weight.t()) + self.layer27_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer27_mod", layer27_mod)
         layer27_mod = layer27_mod.unsqueeze(1)
         layer27_scale_msa, layer27_gate_msa, layer27_scale_mlp, layer27_gate_mlp = layer27_mod.chunk(4, dim=2)
         layer27_gate_msa = torch.tanh(layer27_gate_msa)
@@ -2138,24 +2758,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer27_v = layer27_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer27_q = layer27_q * torch.rsqrt(layer27_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer27_norm_q_weight.view(1, 1, 1, -1)
         layer27_k = layer27_k * torch.rsqrt(layer27_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer27_norm_k_weight.view(1, 1, 1, -1)
-        layer27_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer27_attn_in.dtype)
-        layer27_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer27_attn_in.dtype)
+        layer27_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer27_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer27_q_even = layer27_q[..., 0::2]
         layer27_q_odd = layer27_q[..., 1::2]
         layer27_q = torch.stack([layer27_q_even * layer27_freqs_cos - layer27_q_odd * layer27_freqs_sin, layer27_q_even * layer27_freqs_sin + layer27_q_odd * layer27_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer27_q", layer27_q)
         layer27_k_even = layer27_k[..., 0::2]
         layer27_k_odd = layer27_k[..., 1::2]
         layer27_k = torch.stack([layer27_k_even * layer27_freqs_cos - layer27_k_odd * layer27_freqs_sin, layer27_k_even * layer27_freqs_sin + layer27_k_odd * layer27_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer27_k", layer27_k)
         layer27_q = layer27_q.transpose(1, 2)
         layer27_k = layer27_k.transpose(1, 2)
         layer27_v = layer27_v.transpose(1, 2)
-        layer27_scores = torch.matmul(layer27_q.float(), layer27_k.float().transpose(-2, -1)) * self.attention_scale
-        layer27_probs = torch.softmax(layer27_scores, dim=-1).to(layer27_v.dtype)
+        layer27_scores = torch.matmul(layer27_q, layer27_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer27_scores", layer27_scores)
+        layer27_probs = torch.softmax(layer27_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer27_probs", layer27_probs)
         layer27_attn = torch.matmul(layer27_probs, layer27_v)
         layer27_attn = layer27_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer27_attn = torch.matmul(layer27_attn, self.layer27_attention_to_out_weight.t())
         layer27_attn = layer27_attn * torch.rsqrt(layer27_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer27_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer27_attn", layer27_attn)
         unified_state = unified_state + layer27_gate_msa * layer27_attn
+        if self.debug_nan:
+            debug_check_finite("layer27_state_after_attn", unified_state)
         layer27_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer27_ffn_norm1_weight
         layer27_ffn_in = layer27_ffn_in * layer27_scale_mlp
         layer27_ffn_a = torch.matmul(layer27_ffn_in, self.layer27_feed_forward_w1_weight.t())
@@ -2163,10 +2795,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer27_ffn = F.silu(layer27_ffn_a) * layer27_ffn_b
         layer27_ffn = torch.matmul(layer27_ffn, self.layer27_feed_forward_w2_weight.t())
         layer27_ffn = layer27_ffn * torch.rsqrt(layer27_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer27_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer27_ffn", layer27_ffn)
         unified_state = unified_state + layer27_gate_mlp * layer27_ffn
+        if self.debug_nan:
+            debug_check_finite("layer27_state_after_ffn", unified_state)
 
         # layer28
         layer28_mod = torch.matmul(adaln_input, self.layer28_adaln_weight.t()) + self.layer28_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer28_mod", layer28_mod)
         layer28_mod = layer28_mod.unsqueeze(1)
         layer28_scale_msa, layer28_gate_msa, layer28_scale_mlp, layer28_gate_mlp = layer28_mod.chunk(4, dim=2)
         layer28_gate_msa = torch.tanh(layer28_gate_msa)
@@ -2183,24 +2821,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer28_v = layer28_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer28_q = layer28_q * torch.rsqrt(layer28_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer28_norm_q_weight.view(1, 1, 1, -1)
         layer28_k = layer28_k * torch.rsqrt(layer28_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer28_norm_k_weight.view(1, 1, 1, -1)
-        layer28_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer28_attn_in.dtype)
-        layer28_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer28_attn_in.dtype)
+        layer28_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer28_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer28_q_even = layer28_q[..., 0::2]
         layer28_q_odd = layer28_q[..., 1::2]
         layer28_q = torch.stack([layer28_q_even * layer28_freqs_cos - layer28_q_odd * layer28_freqs_sin, layer28_q_even * layer28_freqs_sin + layer28_q_odd * layer28_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer28_q", layer28_q)
         layer28_k_even = layer28_k[..., 0::2]
         layer28_k_odd = layer28_k[..., 1::2]
         layer28_k = torch.stack([layer28_k_even * layer28_freqs_cos - layer28_k_odd * layer28_freqs_sin, layer28_k_even * layer28_freqs_sin + layer28_k_odd * layer28_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer28_k", layer28_k)
         layer28_q = layer28_q.transpose(1, 2)
         layer28_k = layer28_k.transpose(1, 2)
         layer28_v = layer28_v.transpose(1, 2)
-        layer28_scores = torch.matmul(layer28_q.float(), layer28_k.float().transpose(-2, -1)) * self.attention_scale
-        layer28_probs = torch.softmax(layer28_scores, dim=-1).to(layer28_v.dtype)
+        layer28_scores = torch.matmul(layer28_q, layer28_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer28_scores", layer28_scores)
+        layer28_probs = torch.softmax(layer28_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer28_probs", layer28_probs)
         layer28_attn = torch.matmul(layer28_probs, layer28_v)
         layer28_attn = layer28_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer28_attn = torch.matmul(layer28_attn, self.layer28_attention_to_out_weight.t())
         layer28_attn = layer28_attn * torch.rsqrt(layer28_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer28_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer28_attn", layer28_attn)
         unified_state = unified_state + layer28_gate_msa * layer28_attn
+        if self.debug_nan:
+            debug_check_finite("layer28_state_after_attn", unified_state)
         layer28_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer28_ffn_norm1_weight
         layer28_ffn_in = layer28_ffn_in * layer28_scale_mlp
         layer28_ffn_a = torch.matmul(layer28_ffn_in, self.layer28_feed_forward_w1_weight.t())
@@ -2208,10 +2858,16 @@ class ZImageTransformer2DModel(nn.Module):
         layer28_ffn = F.silu(layer28_ffn_a) * layer28_ffn_b
         layer28_ffn = torch.matmul(layer28_ffn, self.layer28_feed_forward_w2_weight.t())
         layer28_ffn = layer28_ffn * torch.rsqrt(layer28_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer28_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer28_ffn", layer28_ffn)
         unified_state = unified_state + layer28_gate_mlp * layer28_ffn
+        if self.debug_nan:
+            debug_check_finite("layer28_state_after_ffn", unified_state)
 
         # layer29
         layer29_mod = torch.matmul(adaln_input, self.layer29_adaln_weight.t()) + self.layer29_adaln_bias
+        if self.debug_nan:
+            debug_check_finite("layer29_mod", layer29_mod)
         layer29_mod = layer29_mod.unsqueeze(1)
         layer29_scale_msa, layer29_gate_msa, layer29_scale_mlp, layer29_gate_mlp = layer29_mod.chunk(4, dim=2)
         layer29_gate_msa = torch.tanh(layer29_gate_msa)
@@ -2228,24 +2884,36 @@ class ZImageTransformer2DModel(nn.Module):
         layer29_v = layer29_v.view(1, unified_state.shape[1], self.n_kv_heads, self.head_dim)
         layer29_q = layer29_q * torch.rsqrt(layer29_q.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer29_norm_q_weight.view(1, 1, 1, -1)
         layer29_k = layer29_k * torch.rsqrt(layer29_k.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer29_norm_k_weight.view(1, 1, 1, -1)
-        layer29_freqs_cos = unified_freqs.real.unsqueeze(2).to(layer29_attn_in.dtype)
-        layer29_freqs_sin = unified_freqs.imag.unsqueeze(2).to(layer29_attn_in.dtype)
+        layer29_freqs_cos = unified_freqs_cos.unsqueeze(2)
+        layer29_freqs_sin = unified_freqs_sin.unsqueeze(2)
         layer29_q_even = layer29_q[..., 0::2]
         layer29_q_odd = layer29_q[..., 1::2]
         layer29_q = torch.stack([layer29_q_even * layer29_freqs_cos - layer29_q_odd * layer29_freqs_sin, layer29_q_even * layer29_freqs_sin + layer29_q_odd * layer29_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer29_q", layer29_q)
         layer29_k_even = layer29_k[..., 0::2]
         layer29_k_odd = layer29_k[..., 1::2]
         layer29_k = torch.stack([layer29_k_even * layer29_freqs_cos - layer29_k_odd * layer29_freqs_sin, layer29_k_even * layer29_freqs_sin + layer29_k_odd * layer29_freqs_cos], dim=-1).flatten(3)
+        if self.debug_nan:
+            debug_check_finite("layer29_k", layer29_k)
         layer29_q = layer29_q.transpose(1, 2)
         layer29_k = layer29_k.transpose(1, 2)
         layer29_v = layer29_v.transpose(1, 2)
-        layer29_scores = torch.matmul(layer29_q.float(), layer29_k.float().transpose(-2, -1)) * self.attention_scale
-        layer29_probs = torch.softmax(layer29_scores, dim=-1).to(layer29_v.dtype)
+        layer29_scores = torch.matmul(layer29_q, layer29_k.transpose(-2, -1)) * self.attention_scale
+        if self.debug_nan:
+            debug_check_finite("layer29_scores", layer29_scores)
+        layer29_probs = torch.softmax(layer29_scores, dim=-1)
+        if self.debug_nan:
+            debug_check_finite("layer29_probs", layer29_probs)
         layer29_attn = torch.matmul(layer29_probs, layer29_v)
         layer29_attn = layer29_attn.transpose(1, 2).reshape(1, unified_state.shape[1], self.q_proj_dim)
         layer29_attn = torch.matmul(layer29_attn, self.layer29_attention_to_out_weight.t())
         layer29_attn = layer29_attn * torch.rsqrt(layer29_attn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer29_attention_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer29_attn", layer29_attn)
         unified_state = unified_state + layer29_gate_msa * layer29_attn
+        if self.debug_nan:
+            debug_check_finite("layer29_state_after_attn", unified_state)
         layer29_ffn_in = unified_state * torch.rsqrt(unified_state.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer29_ffn_norm1_weight
         layer29_ffn_in = layer29_ffn_in * layer29_scale_mlp
         layer29_ffn_a = torch.matmul(layer29_ffn_in, self.layer29_feed_forward_w1_weight.t())
@@ -2253,14 +2921,24 @@ class ZImageTransformer2DModel(nn.Module):
         layer29_ffn = F.silu(layer29_ffn_a) * layer29_ffn_b
         layer29_ffn = torch.matmul(layer29_ffn, self.layer29_feed_forward_w2_weight.t())
         layer29_ffn = layer29_ffn * torch.rsqrt(layer29_ffn.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.layer29_ffn_norm2_weight
+        if self.debug_nan:
+            debug_check_finite("layer29_ffn", layer29_ffn)
         unified_state = unified_state + layer29_gate_mlp * layer29_ffn
+        if self.debug_nan:
+            debug_check_finite("layer29_state_after_ffn", unified_state)
 
         # final projection back to latent patches
         final_scale = torch.matmul(F.silu(adaln_input), self.final_adaln_weight.t()) + self.final_adaln_bias
         final_scale = 1.0 + final_scale
-        unified_state = F.layer_norm(unified_state.float(), (self.dim,), None, None, 1e-6).to(adaln_input.dtype)
+        if self.debug_nan:
+            debug_check_finite("final_scale", final_scale)
+        unified_state = F.layer_norm(unified_state, (self.dim,), None, None, 1e-6)
+        if self.debug_nan:
+            debug_check_finite("final_layer_norm", unified_state)
         unified_state = unified_state * final_scale.unsqueeze(1)
         unified_state = torch.matmul(unified_state, self.final_linear_weight.t()) + self.final_linear_bias
+        if self.debug_nan:
+            debug_check_finite("final_linear", unified_state)
 
         # unpatchify only the image token prefix back to [C, F, H, W]
         image_out = unified_state[0, :image_original_len, :]
@@ -2274,6 +2952,8 @@ class ZImageTransformer2DModel(nn.Module):
             self.out_channels,
         )
         image_out = image_out.permute(6, 0, 3, 1, 4, 2, 5).reshape(self.out_channels, frames, height, width)
+        if self.debug_nan:
+            debug_check_finite("image_out", image_out)
         return [image_out], {}
 
 # -----------------------------------------------------------------------------
@@ -2303,8 +2983,8 @@ def resolve_dtype(name: str, device: torch.device) -> torch.dtype:
         return torch.float16
     if name == "float32":
         return torch.float32
-    if device.type == "cuda":
-        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    if device.type in {"cuda", "mps"}:
+        return torch.float16
     return torch.float32
 
 
@@ -2868,7 +3548,7 @@ def generate_image(
             raise ValueError("inference-sequential.py only supports guidance <= 1.0")
 
         model_latents = latents.to(transformer_dtype)
-        model_timestep = timestep_input
+        model_timestep = timestep_input.to(transformer_dtype)
         model_embeds = prompt_embeds
 
         outputs = transformer(list(model_latents.unsqueeze(2).unbind(0)), model_timestep, model_embeds)[0]
@@ -2895,6 +3575,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
     parser.add_argument("--dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
+    parser.add_argument("--debug-nan", action="store_true", help="Stop at the first non-finite tensor inside the transformer")
     return parser.parse_args()
 
 
@@ -2912,6 +3593,7 @@ def main() -> None:
     start_time = time.time()
 
     transformer = load_transformer(model_dir / "transformer", device, dtype)
+    transformer.debug_nan = args.debug_nan
     vae = load_vae(model_dir / "vae", device)
     text_encoder = load_text_encoder(model_dir / "text_encoder", device, dtype)
     tokenizer_dir = model_dir / "tokenizer"
